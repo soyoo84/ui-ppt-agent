@@ -126,8 +126,13 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
         bg_shape.line.color.rgb = RGBColor(220, 220, 220)      # 옅은 테두리선
     # --- [시각적 컨테이너(배경 화면 박스) 추가 끝] ---
 
-    # 반환된 컴포넌트들을 순회하며 그리기
-    for comp in analysis_result.components:
+    # --- [Z-Index 보정 알고리즘 추가] ---
+    # 모달(팝업) 창이 다른 요소들에 가려지지 않고 항상 최상단에 오도록 가장 마지막에 그립니다.
+    regular_comps = [c for c in analysis_result.components if c.component_type != "Modal"]
+    modal_comps = [c for c in analysis_result.components if c.component_type == "Modal"]
+    
+    # 반환된 컴포넌트들을 순회하며 그리기 (일반 도형 먼저 -> 모달 나중에)
+    for comp in regular_comps + modal_comps:
         # 비율(0.0~1.0)을 안전하게 클램핑(Clamping)하여 PPT 영역을 벗어나지 않도록 방어
         safe_x = max(0.0, min(1.0, comp.x_percent))
         safe_y = max(0.0, min(1.0, comp.y_percent))
