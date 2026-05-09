@@ -2,7 +2,7 @@ import os
 import datetime
 from pptx import Presentation
 from pptx.util import Inches, Pt
-from pptx.enum.text import PP_ALIGN
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
 from schemas import ScreenAnalysisResult
@@ -127,12 +127,13 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
     # --- [시각적 컨테이너(배경 화면 박스) 추가 끝] ---
 
     # --- [Z-Index 보정 알고리즘 추가] ---
-    # 모달(팝업) 창이 다른 요소들에 가려지지 않고 항상 최상단에 오도록 가장 마지막에 그립니다.
-    regular_comps = [c for c in analysis_result.components if c.component_type != "Modal"]
-    modal_comps = [c for c in analysis_result.components if c.component_type == "Modal"]
+    # 모달, 툴팁, 드롭다운 등 화면에 떠 있는(Floating) 요소들이 다른 도형에 가려지지 않도록 가장 마지막(최상단)에 그립니다.
+    floating_types = {"Modal", "Tooltip", "Dropdown"}
+    regular_comps = [c for c in analysis_result.components if c.component_type not in floating_types]
+    floating_comps = [c for c in analysis_result.components if c.component_type in floating_types]
     
-    # 반환된 컴포넌트들을 순회하며 그리기 (일반 도형 먼저 -> 모달 나중에)
-    for comp in regular_comps + modal_comps:
+    # 반환된 컴포넌트들을 순회하며 그리기 (일반 도형 먼저 -> 플로팅 도형 나중에)
+    for comp in regular_comps + floating_comps:
         # 비율(0.0~1.0)을 안전하게 클램핑(Clamping)하여 PPT 영역을 벗어나지 않도록 방어
         safe_x = max(0.0, min(1.0, comp.x_percent))
         safe_y = max(0.0, min(1.0, comp.y_percent))
@@ -157,7 +158,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             shape.line.color.rgb = RGBColor(*HDS_PRIMARY_COLOR)
             
             tf = shape.text_frame
-            tf.text = comp.text
+            tf.text = comp.text if comp.text else "버튼"
             tf.paragraphs[0].alignment = PP_ALIGN.CENTER
             tf.paragraphs[0].font.color.rgb = RGBColor(255, 255, 255)
             tf.paragraphs[0].font.bold = True
@@ -172,6 +173,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             
             tf = shape.text_frame
             tf.text = comp.text if comp.text else "도움말 툴팁"
+            tf.word_wrap = True
             tf.paragraphs[0].alignment = PP_ALIGN.CENTER
             tf.paragraphs[0].font.color.rgb = RGBColor(255, 255, 255)
             tf.paragraphs[0].font.size = Pt(10)
@@ -197,7 +199,8 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             shape.line.color.rgb = RGBColor(180, 180, 180) # 회색 테두리
             
             tf = shape.text_frame
-            tf.text = f" {comp.text}" # 좌측 여백을 위해 공백 추가
+            safe_text = comp.text if comp.text else ""
+            tf.text = f" {safe_text}" # 좌측 여백을 위해 공백 추가
             tf.paragraphs[0].alignment = PP_ALIGN.LEFT
             tf.paragraphs[0].font.color.rgb = RGBColor(150, 150, 150)
             
@@ -209,7 +212,8 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             shape.line.color.rgb = RGBColor(200, 200, 200)
             
             tf = shape.text_frame
-            tf.text = f" {comp.text}   ▼"
+            safe_text = comp.text if comp.text else "선택"
+            tf.text = f" {safe_text}   ▼"
             tf.paragraphs[0].alignment = PP_ALIGN.LEFT
             tf.paragraphs[0].font.color.rgb = RGBColor(80, 80, 80)
             tf.paragraphs[0].font.size = Pt(12)
@@ -234,6 +238,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
                     
                     cell.text_frame.paragraphs[0].font.size = Pt(10)
                     cell.text_frame.paragraphs[0].font.color.rgb = RGBColor(80, 80, 80)
+                    cell.vertical_anchor = MSO_ANCHOR.MIDDLE
                     
         elif comp.component_type == "AgGridToolbar":
             # AG Grid 상단 툴바 (우측 정렬된 액션 버튼이나 검색창 표현)
@@ -285,7 +290,8 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             # Ant Design 스타일의 Radio Button (동그란 라디오 버튼 + 텍스트)
             txBox = slide.shapes.add_textbox(left, top, width, height)
             tf = txBox.text_frame
-            tf.text = f"◉ {comp.text}" # 선택된 라디오 버튼 기호
+            safe_text = comp.text if comp.text else ""
+            tf.text = f"◉ {safe_text}" # 선택된 라디오 버튼 기호
             tf.paragraphs[0].alignment = PP_ALIGN.LEFT
             tf.paragraphs[0].font.color.rgb = RGBColor(50, 50, 50)
             tf.paragraphs[0].font.size = Pt(12)
@@ -299,6 +305,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             
             tf = shape.text_frame
             tf.text = f"  {comp.text}" if comp.text else "  모달 타이틀"
+            tf.word_wrap = True
             tf.paragraphs[0].alignment = PP_ALIGN.LEFT
             tf.paragraphs[0].font.color.rgb = RGBColor(30, 30, 30)
             tf.paragraphs[0].font.bold = True
@@ -308,7 +315,8 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             # 배경이 없는 투명한 텍스트 박스
             txBox = slide.shapes.add_textbox(left, top, width, height)
             tf = txBox.text_frame
-            tf.text = comp.text
+            tf.text = comp.text if comp.text else "텍스트"
+            tf.word_wrap = True
             tf.paragraphs[0].font.color.rgb = RGBColor(30, 30, 30)
             tf.paragraphs[0].font.size = Pt(14)
             

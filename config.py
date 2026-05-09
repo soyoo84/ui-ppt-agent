@@ -1,8 +1,8 @@
 import os
 from dotenv import load_dotenv
 
-# .env 파일 로드
-load_dotenv()
+# .env 파일 로드 (수정 시 기존 메모리 환경변수를 강제로 덮어쓰기)
+load_dotenv(override=True)
 
 # [API Settings]
 HCP_API_URL = os.getenv("HCP_API_URL") or "https://hcp.skhynix.com/llm/v1"
@@ -13,7 +13,8 @@ HCP_TEXT_MODEL = os.getenv("HCP_TEXT_MODEL") or "qwen-3.5"
 # [LLM Settings]
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES") or 3)
 LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS") or 120.0)
-LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS") or 2048)
+_max_tokens = os.getenv("LLM_MAX_TOKENS") or "0"
+LLM_MAX_TOKENS = int(_max_tokens) if _max_tokens.isdigit() and int(_max_tokens) > 0 else None
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE") or 0.1)
 
 # [Frontend Settings]
@@ -33,6 +34,9 @@ _primary_color_str = os.getenv("HDS_PRIMARY_COLOR_RGB") or "230,0,18"
 
 try:
     # 사용자가 .env에 띄어쓰기를 포함해 입력하더라도 안전하게 처리되도록 공백 제거 후 파싱
-    HDS_PRIMARY_COLOR = tuple(map(int, _primary_color_str.replace(" ", "").split(",")))
+    parsed_color = tuple(map(int, _primary_color_str.replace(" ", "").split(",")))
+    if len(parsed_color) != 3:
+        raise ValueError("RGB 값은 반드시 3개의 숫자여야 합니다.")
+    HDS_PRIMARY_COLOR = parsed_color
 except ValueError:
     HDS_PRIMARY_COLOR = (230, 0, 18) # 파싱 실패 시 기본 컬러(Red)로 안전하게 롤백
