@@ -1,0 +1,6 @@
+python-pptx
+streamlit
+pydantic
+pillow
+openai
+python-dotenv

@@ -1,0 +1,56 @@
+/* HDS (Hynix Design System) 샘플 CSS */
+/* 본 CSS는 Ant Design 클래스명을 기반으로 하이닉스 브랜드 컬러를 덧입힌 샘플입니다. */
+
+body {
+    font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+    background-color: #f8f9fa;
+    color: #333;
+}
+
+/* Primary Button (빨간색) */
+.ant-btn-primary {
+    background-color: #E60012;
+    border-color: #E60012;
+    color: #fff;
+    border-radius: 6px;
+    padding: 6px 15px;
+    cursor: pointer;
+    font-weight: bold;
+}
+
+/* Input / TextInput (회색 테두리) */
+.ant-input {
+    border: 1px solid #b4b4b4;
+    border-radius: 4px;
+    padding: 6px 11px;
+    color: #333;
+}
+
+/* Select / Dropdown */
+.ant-select {
+    border: 1px solid #c8c8c8;
+    border-radius: 4px;
+    padding: 6px 11px;
+    background-color: #fff;
+}
+
+/* Modal (진한 테두리와 그림자) */
+.ant-modal {
+    border: 2px solid #787878;
+    background-color: #fff;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    padding: 20px;
+}
+
+/* Toggle Switch (파란색 활성화) */
+.ant-switch-checked {
+    background-color: #1890ff;
+}
+
+/* AG Grid 헤더 (연한 회색) */
+.ag-header {
+    background-color: #f8f8f8;
+    border-bottom: 1px solid #e0e0e0;
+    font-weight: bold;
+}
