@@ -248,7 +248,8 @@ def generate_and_render_ppt(img_bytes, prompt_text, prev_json, feedback_msg, tem
                 "raw_html": analysis_result.generated_html,
                 "json_str": json_content,
                 "components": analysis_result.components,
-                "screen_name": analysis_result.screen_name
+                "screen_name": analysis_result.screen_name,
+                "is_react": "React" in prompt_text
             }
             st.session_state["last_json"] = json_content
             elapsed = round(time.time() - start_time, 1)
@@ -279,8 +280,10 @@ with col2:
             try:
                 css_content = load_css_content("hds.css")
                 
-                # React 코드일 경우 브라우저 직접 렌더링이 불가능하므로 안내 메시지로 대체 (깨짐 방지)
-                if "React" in custom_prompt:
+                # [상태 동기화 방어] 생성 시점의 프롬프트 상태(is_react)를 기준으로 UI를 렌더링 (드롭다운 변경 시 UI 깨짐 방지)
+                is_react_mode = data.get("is_react", "React" in custom_prompt)
+                
+                if is_react_mode:
                     html_for_preview = """<div style="display:flex; justify-content:center; align-items:center; height:400px; background:#f8f9fa; border-radius:8px; color:#555; text-align:center; font-family:sans-serif;">
                         <h3>⚛️ React(JSX) 코드는 브라우저에서 직접 렌더링할 수 없습니다.<br><br>상단의 <b>💻 React 코드</b> 탭과 다운로드 파일을 확인해 주세요.</h3>
                     </div>"""
@@ -292,8 +295,8 @@ with col2:
                         flags=re.IGNORECASE
                     )
                 
-                code_title = "💻 React 코드" if "React" in custom_prompt else "💻 HTML 코드"
-                code_lang = "jsx" if "React" in custom_prompt else "html"
+                code_title = "💻 React 코드" if is_react_mode else "💻 HTML 코드"
+                code_lang = "jsx" if is_react_mode else "html"
                 
                 # CSS 존재 여부에 따라 탭을 동적으로 생성 (빈 탭 방지)
                 tab_names = ["👀 화면 미리보기", code_title, "📝 JSON 데이터"]
@@ -332,7 +335,7 @@ with col2:
                 dl_buttons = [
                     ("📊 PPT 다운로드", data["ppt"], f"UI_정의서_{base_name}.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation")
                 ]
-                if "React" in custom_prompt:
+                if is_react_mode:
                     dl_buttons.append(("⚛️ React(JSX) 다운로드", data.get("raw_html", ""), f"{base_name}.jsx", "text/plain"))
                 else:
                     dl_buttons.append(("🌐 HTML 다운로드", data["html_str"], f"index_{base_name}.html", "text/html"))

@@ -194,8 +194,10 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
         height = max(int(Inches(0.3)), height)
 
         if comp.component_type in ("PrimaryButton", "Button", "HdsButton", "ant-btn", "ant-btn-primary", "ant-btn-default"):
+            # [찌그러짐 방어] 버튼 내 텍스트가 두 줄로 쪼개지는 현상 방지
+            btn_width = max(int(Inches(1.0)), width)
             # 둥근 모서리 사각형 (MSO_SHAPE.ROUNDED_RECTANGLE = 5)
-            shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height)
+            shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, btn_width, height)
             shape.fill.solid()
             shape.fill.fore_color.rgb = RGBColor(*HDS_PRIMARY_COLOR) # 환경설정 메인 컬러 적용
             shape.line.color.rgb = RGBColor(*HDS_PRIMARY_COLOR)
@@ -235,8 +237,10 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             fg_shape.line.color.rgb = RGBColor(*HDS_PRIMARY_COLOR)
             
         elif comp.component_type in ("TextInput", "Input", "HdsInput", "TextArea", "ant-input"):
+            # [찌그러짐 방어] 텍스트 입력창이 너무 좁게 나오는 현상 방지
+            input_width = max(int(Inches(1.5)), width)
             # 일반 사각형 테두리 (MSO_SHAPE.RECTANGLE = 1)
-            shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
+            shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, input_width, height)
             shape.fill.solid()
             shape.fill.fore_color.rgb = RGBColor(255, 255, 255)
             shape.line.color.rgb = RGBColor(180, 180, 180) # 회색 테두리
@@ -265,14 +269,24 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             
         elif comp.component_type in ("AgGrid", "Table", "DataGrid", "DataTable", "Grid", "HdsDataGrid", "ag-root-wrapper", "ant-table"):
             # 데이터 그리드를 확실한 표(Table) 형태로 렌더링
+            # [찌그러짐 방어] LLM이 표의 영역을 너무 작게(헤더만) 잡았을 경우 최소 크기 강제 보장
+            grid_width = max(int(Inches(2.5)), width)
+            grid_height = max(int(Inches(1.2)), height)
+            
             # 3행 4열의 기본 표를 생성하여 시각적으로 풍부하게 표현
-            table_shape = slide.shapes.add_table(3, 4, left, top, width, height)
+            table_shape = slide.shapes.add_table(3, 4, left, top, grid_width, grid_height)
             table = table_shape.table
             
             # 헤더(첫 행) 및 데이터 행 스타일링
             for r_idx in range(3):
                 for c_idx in range(4):
                     cell = table.cell(r_idx, c_idx)
+                    # [찌그러짐 방어] PPT 셀의 기본 여백이 너무 커서 텍스트가 찌그러지는 현상 방지
+                    cell.margin_left = Pt(4)
+                    cell.margin_right = Pt(4)
+                    cell.margin_top = Pt(4)
+                    cell.margin_bottom = Pt(4)
+                    
                     if r_idx == 0:
                         cell.text = f"Column {c_idx + 1}"
                         cell.fill.solid()
@@ -325,8 +339,10 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             tf.paragraphs[0].font.size = Pt(11)
             
         elif comp.component_type in ("Checkbox", "HdsCheckbox", "ant-checkbox", "ant-checkbox-wrapper", "ant-checkbox-checked"):
+            # [찌그러짐 방어] 체크박스 텍스트가 줄바꿈되는 현상 방지
+            cb_width = max(int(Inches(1.2)), width)
             # Checkbox: 텍스트 박스를 그리고 좌측에 체크박스 특수문자(☑ 또는 ☐) 삽입
-            txBox = slide.shapes.add_textbox(left, top, width, height)
+            txBox = slide.shapes.add_textbox(left, top, cb_width, height)
             tf = txBox.text_frame
             # Ant Design의 체크 안 된 상태의 기본 박스 모양 표현
             safe_text = comp.text if comp.text else "체크박스"
@@ -337,8 +353,10 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             tf.paragraphs[0].font.size = Pt(12)
             
         elif comp.component_type in ("ToggleSwitch", "Switch", "HdsSwitch", "ant-switch", "ant-switch-checked"):
+            # [찌그러짐 방어] 토글 스위치가 너무 좁아지는 현상 방지
+            ts_width = max(int(Inches(0.6)), width)
             # Ant Design 스타일의 Toggle Switch (활성화 상태 표현)
-            shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height) # 둥근 사각형
+            shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, ts_width, height) # 둥근 사각형
             shape.fill.solid()
             shape.fill.fore_color.rgb = RGBColor(24, 144, 255) # Ant Design 기본 파란색 (활성화)
             shape.line.color.rgb = RGBColor(24, 144, 255)
@@ -349,8 +367,10 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             tf.paragraphs[0].font.color.rgb = RGBColor(255, 255, 255)
             
         elif comp.component_type in ("RadioButton", "Radio", "HdsRadio", "ant-radio", "ant-radio-wrapper", "ant-radio-checked"):
+            # [찌그러짐 방어] 라디오 버튼 텍스트가 줄바꿈되는 현상 방지
+            rb_width = max(int(Inches(1.2)), width)
             # Ant Design 스타일의 Radio Button (동그란 라디오 버튼 + 텍스트)
-            txBox = slide.shapes.add_textbox(left, top, width, height)
+            txBox = slide.shapes.add_textbox(left, top, rb_width, height)
             tf = txBox.text_frame
             safe_text = comp.text if comp.text else "라디오"
             tf.text = f"◉ {safe_text}" # 선택된 라디오 버튼 기호
