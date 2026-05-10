@@ -93,9 +93,6 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
     
     # 템플릿 상단의 'UI 정의서 표/내용' 영역을 덮어쓰지 않도록 UI 렌더링 영역을 하단으로 내립니다.
     ui_scale = PPT_UI_SCALE
-    # 상단 여백 확보를 위해 UI 스케일이 너무 크면 자동으로 약간 축소 (기본 65%)
-    if ui_scale > 0.65:
-        ui_scale = 0.65
         
     slide_width = actual_slide_width * ui_scale
     slide_height = actual_slide_height * ui_scale
@@ -616,10 +613,13 @@ def sync_design_tokens_from_css(css_path="hds.css"):
         registry = get_component_registry()
         updated_count = 0
         
-        # CSS 블록 추출 (예: .ant-btn-primary { background-color: #E60012; })
-        blocks = re.findall(r'\.([a-zA-Z0-9_-]+)\s*\{([^}]*)\}', css_content)
+        # 1. 주석 제거 (정규식 오작동 및 더미 데이터 스캔 방지)
+        css_content = re.sub(r'/\*.*?\*/', '', css_content, flags=re.DOTALL)
         
-        for class_name, block_content in blocks:
+        # 2. 모든 선택자(Selector)와 속성 블록( { ... } ) 추출
+        blocks = re.findall(r'([^{]+)\{([^}]*)\}', css_content)
+        
+        for selectors, block_content in blocks:
             bg_match = re.search(r'background(?:-color)?\s*:\s*([^;!]+)', block_content)
             text_match = re.search(r'(?<!-|\w)color\s*:\s*([^;!]+)', block_content)
             border_match = re.search(r'border(?:-color)?\s*:\s*([^;!]+)', block_content)
@@ -632,23 +632,26 @@ def sync_design_tokens_from_css(css_path="hds.css"):
                 if hex_in_border: line_color = _hex_to_rgb(hex_in_border.group(0))
                 else: line_color = _parse_color(border_match.group(1))
                 
-            if bg_color or text_color or line_color:
-                if class_name in registry and registry[class_name].get("locked") is True:
-                    continue # 잠금(Lock) 설정된 컴포넌트는 업데이트 스킵
+            # 선택자 문자열 내부의 모든 클래스명(.class-name)을 추출하여 다중 맵핑
+            classes = re.findall(r'\.([a-zA-Z0-9_-]+)', selectors)
+            for class_name in classes:
+                if bg_color or text_color or line_color:
+                    if class_name in registry and registry[class_name].get("locked") is True:
+                        continue # 잠금(Lock) 설정된 컴포넌트는 업데이트 스킵
+                        
+                    if class_name not in registry:
+                        registry[class_name] = {"guide": f"CSS 클래스 .{class_name} 기반 컴포넌트", "ppt_style": {}}
                     
-                if class_name not in registry:
-                    registry[class_name] = {"guide": f"CSS 클래스 .{class_name} 기반 컴포넌트", "ppt_style": {}}
-                
-                ppt_style = registry[class_name].get("ppt_style", {})
-                if "shape" not in ppt_style:
-                    ppt_style["shape"] = "ROUNDED_RECTANGLE" if "btn" in class_name else "RECTANGLE"
+                    ppt_style = registry[class_name].get("ppt_style", {})
+                    if "shape" not in ppt_style:
+                        ppt_style["shape"] = "ROUNDED_RECTANGLE" if "btn" in class_name else "RECTANGLE"
+                        
+                    if bg_color: ppt_style["bg"] = bg_color
+                    if text_color: ppt_style["text"] = text_color
+                    if line_color: ppt_style["line"] = line_color
                     
-                if bg_color: ppt_style["bg"] = bg_color
-                if text_color: ppt_style["text"] = text_color
-                if line_color: ppt_style["line"] = line_color
-                
-                registry[class_name]["ppt_style"] = ppt_style
-                updated_count += 1
+                    registry[class_name]["ppt_style"] = ppt_style
+                    updated_count += 1
                 
         if updated_count > 0:
             with open("components_registry.json", "w", encoding="utf-8") as f:

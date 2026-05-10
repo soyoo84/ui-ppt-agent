@@ -36,11 +36,11 @@ class HCPQwenService:
         except json.JSONDecodeError:
             return None
             
-    def _call_api_with_retry(self, model_name, messages, step_name):
+    def _call_api_with_retry(self, model_name, messages, step_name, max_tokens_override=None):
         """OpenAI 호환 API 호출 (타임아웃 및 재시도 로직 공통화)"""
         max_retries = LLM_MAX_RETRIES
         timeout_seconds = LLM_TIMEOUT_SECONDS
-        max_tokens = LLM_MAX_TOKENS
+        max_tokens = max_tokens_override if max_tokens_override else LLM_MAX_TOKENS
         temperature = LLM_TEMPERATURE
         
         for attempt in range(max_retries):
@@ -143,8 +143,8 @@ class HCPQwenService:
                         # [토큰 다이어트] 파일이 너무 크면 내부 스타일 속성({ ... })은 버리고 클래스명만 추출
                         class_names = set(re.findall(r'\.([a-zA-Z0-9_-]+)', raw_css))
                         css_content = "/* CSS 용량 초과 방지: 사내 가이드 클래스명 목록만 요약 추출함 */\n" + ", ".join([f".{c}" for c in sorted(class_names)])
-                        if len(css_content) > 2500:
-                            css_content = css_content[:2500] + "..."
+                        if len(css_content) > 1500:
+                            css_content = css_content[:1500] + "..."
                     else:
                         css_content = raw_css
             except Exception as e:
@@ -209,7 +209,7 @@ class HCPQwenService:
             img = Image.open(io.BytesIO(image_bytes))
             original_format = img.format if img.format else ("PNG" if image_bytes.startswith(b'\x89PNG') else "JPEG")
             img = ImageOps.exif_transpose(img)
-            max_size = 1440
+            max_size = 1024 # 4400 토큰 한계 돌파를 위해 이미지 리사이징 기준을 1440에서 1024로 하향
             if img.width > max_size or img.height > max_size:
                 img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
                 
@@ -240,7 +240,8 @@ class HCPQwenService:
             ]
             
             logger.info("=== 2-Pass Pipeline: [Pass 1] Vision API 시작 ===")
-            vision_output = self._call_api_with_retry(self.vision_model, vision_messages, "Pass 1")
+            # [토큰 다이어트] Pass 1은 JSON 구조만 뽑으므로 출력 토큰을 800으로 제한하여 입력 공간 대폭 확보
+            vision_output = self._call_api_with_retry(self.vision_model, vision_messages, "Pass 1", max_tokens_override=800)
             
             # JSON 추출 (복구 로직 포함)
             parsed_dict = self._extract_json_from_text(vision_output)
@@ -266,7 +267,7 @@ class HCPQwenService:
             text_user_prompt += "\n위 데이터를 바탕으로, 원래의 시스템 프롬프트 지시사항에 맞추어 'generated_html'에 들어갈 코드를 작성하세요.\n다른 설명이나 마크다운 없이, 오직 HTML 또는 React(JSX) 코드 원본 자체만 텍스트로 반환하세요. (코드 블록 ```html 사용 무방)"
             
             # [2-Pass 최적화] 2단계에서는 시스템 프롬프트의 JSON 제약을 해제하여 충돌을 방지합니다.
-            pass2_system_prompt = system_prompt + "\n\n[🚨 2-Pass 아키텍처 2단계: 응답 형식 변경]\n이전 지시사항의 'JSON 응답' 제약을 무시하세요. 이번 단계에서는 JSON이 아닌, 순수한 프론트엔드 코드(HTML/JSX) 원본 텍스트만을 출력해야 합니다."
+            pass2_system_prompt = system_prompt + "\n\n[🚨 2-Pass 아키텍처 2단계: 응답 형식 변경]\n이전 지시사항의 'JSON 응답' 제약 및 '한 줄 작성(\\n)' 제약을 완전히 무시하세요. 이번 단계에서는 JSON 형식이 아닌, 들여쓰기와 줄바꿈(엔터)이 정상적으로 적용된 순수한 프론트엔드 코드(HTML/JSX) 원본 텍스트만을 출력해야 합니다."
             
             text_messages = [
                 {"role": "system", "content": pass2_system_prompt},
@@ -300,6 +301,9 @@ class HCPQwenService:
             else:
                 cleaned_html = re.sub(r'^\s*```[a-zA-Z]*\n?', '', cleaned_html)
                 cleaned_html = re.sub(r'\n?```\s*$', '', cleaned_html)
+            
+            # [최종 방어 2] LLM이 Base 프롬프트의 압박을 이기지 못하고 리터럴 '\n' 문자를 출력했을 경우, 이를 실제 줄바꿈(엔터)으로 안전하게 변환
+            cleaned_html = cleaned_html.replace('\\n', '\n')
             
             parsed_dict["generated_html"] = cleaned_html.strip()
             

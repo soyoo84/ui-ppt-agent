@@ -14,6 +14,7 @@ from ppt_service import create_editable_ppt, get_layout_names
 
 # --- [엔터프라이즈 로깅 시스템 설정] ---
 os.makedirs("logs", exist_ok=True)
+os.makedirs(MASTER_TEMPLATE_DIR, exist_ok=True) # 템플릿 보관용 폴더 자동 생성
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
