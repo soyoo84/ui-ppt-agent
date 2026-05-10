@@ -17,11 +17,25 @@ def _get_env_float(key: str, default: float) -> float:
     try: return float(val)
     except ValueError: return default
 
+def _get_env_bool(key: str, default: bool) -> bool:
+    val = os.getenv(key)
+    if not val: return default
+    return val.strip().lower() in ("true", "1", "t", "yes", "y")
+
 # [API Settings]
-HCP_API_URL = os.getenv("HCP_API_URL") or "https://hcp.skhynix.com/llm/v1"
-HCP_API_KEY = os.getenv("HCP_API_KEY") or "EMPTY"
-HCP_VISION_MODEL = os.getenv("HCP_VISION_MODEL") or "qwen-2.5-vl"
-HCP_TEXT_MODEL = os.getenv("HCP_TEXT_MODEL") or "qwen-3.5"
+HCP_API_URL = os.getenv("HCP_API_URL")
+HCP_API_KEY = os.getenv("HCP_API_KEY")
+HCP_VISION_MODEL = os.getenv("HCP_VISION_MODEL")
+HCP_TEXT_MODEL = os.getenv("HCP_TEXT_MODEL")
+
+if not HCP_API_URL:
+    raise ValueError("🚨 설정 에러: HCP_API_URL이 누락되었습니다. '.env' 파일에 명시해 주세요.")
+if not HCP_API_KEY or HCP_API_KEY.strip() in ("", "your_api_key_here"):
+    raise ValueError("🚨 보안 에러: HCP_API_KEY가 누락되었습니다. 소스 코드에 직접 하드코딩하지 마시고, 반드시 루트 경로의 '.env' 파일에 안전하게 설정해 주세요.")
+if not HCP_VISION_MODEL:
+    raise ValueError("🚨 설정 에러: HCP_VISION_MODEL이 누락되었습니다. '.env' 파일에 명시해 주세요.")
+if not HCP_TEXT_MODEL:
+    raise ValueError("🚨 설정 에러: HCP_TEXT_MODEL이 누락되었습니다. '.env' 파일에 명시해 주세요.")
 
 # [LLM Settings]
 LLM_MAX_RETRIES = _get_env_int("LLM_MAX_RETRIES", 3)
@@ -51,8 +65,8 @@ try:
     parsed_color = tuple(map(int, _primary_color_str.replace(" ", "").split(",")))
     if len(parsed_color) != 3:
         raise ValueError("RGB 값은 반드시 3개의 숫자여야 합니다.")
-        if any(c < 0 or c > 255 for c in parsed_color):
-            raise ValueError("RGB 값은 0~255 사이여야 합니다.")
+    if any(c < 0 or c > 255 for c in parsed_color):
+        raise ValueError("RGB 값은 0~255 사이여야 합니다.")
     HDS_PRIMARY_COLOR = parsed_color
 except Exception as e:
     print(f"⚠️ [Warning] HDS_PRIMARY_COLOR_RGB 설정 오류 ({e}) - 기본값(230,0,18)으로 롤백됩니다.")

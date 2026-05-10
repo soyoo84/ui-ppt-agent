@@ -29,10 +29,56 @@ class HCPQwenService:
         self.vision_model = HCP_VISION_MODEL
         self.text_model = HCP_TEXT_MODEL
 
+    def _try_parse_json(self, j_str: str):
+        """[토큰 잘림 방어 로직] 강제 닫기 시도용 JSON 파싱 헬퍼 함수"""
+        try:
+            return json.loads(j_str, strict=False)
+        except json.JSONDecodeError:
+            return None
+            
+    def _call_api_with_retry(self, model_name, messages, step_name):
+        """OpenAI 호환 API 호출 (타임아웃 및 재시도 로직 공통화)"""
+        max_retries = LLM_MAX_RETRIES
+        timeout_seconds = LLM_TIMEOUT_SECONDS
+        max_tokens = LLM_MAX_TOKENS
+        temperature = LLM_TEMPERATURE
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    timeout=timeout_seconds
+                )
+                return response.choices[0].message.content or ""
+            except APITimeoutError:
+                if attempt == max_retries - 1:
+                    raise ValueError(f"[{step_name}] LLM API 응답 시간이 초과되었습니다 ({timeout_seconds}초). 서버 상태가 혼잡할 수 있으니 잠시 후 다시 시도해 주세요.")
+                logger.warning(f"[{step_name}] API 타임아웃 발생, 재시도 중... ({attempt + 1}/{max_retries})")
+                time.sleep(2 ** attempt)
+            except APIStatusError as e:
+                if e.status_code == 400 and ("token" in str(e.message).lower() or "length" in str(e.message).lower() or "context" in str(e.message).lower()):
+                    raise ValueError(f"[{step_name}] LLM의 최대 입력 토큰 제한(4400)을 초과했습니다. 화면이 너무 길거나 복잡합니다. 해상도를 줄이거나 일부 영역만 캡쳐해 주세요.")
+                if e.status_code in [429, 500, 502, 503, 504]:
+                    if attempt == max_retries - 1:
+                        raise ValueError(f"[{step_name}] LLM API 서버 오류({e.status_code})가 지속되어 실패했습니다: {e.message}")
+                    logger.warning(f"[{step_name}] API 상태 오류({e.status_code}) 발생, 재시도 중... ({attempt + 1}/{max_retries})")
+                    time.sleep(2 ** attempt)
+                else:
+                    raise ValueError(f"[{step_name}] LLM API 요청 오류({e.status_code}): {e.message}")
+            except APIConnectionError:
+                if attempt == max_retries - 1:
+                    raise ValueError(f"[{step_name}] LLM API 서버에 연결할 수 없습니다. 사내망 네트워크 상태를 확인해 주세요.")
+                logger.warning(f"[{step_name}] API 연결 오류 발생, 재시도 중... ({attempt + 1}/{max_retries})")
+                time.sleep(2 ** attempt)
+        return ""
+
     def _extract_json_from_text(self, text: str) -> dict:
         """LLM이 반환한 텍스트에서 JSON 블록만 추출합니다. (오류 방지 최적화)"""
-        # 마크다운에 'json' 태그가 누락되거나 대소문자가 달라도 처리할 수 있도록 정규식 개선
-        match = re.search(r'```(?:json)?\s*(.*?)\s*```', text, re.DOTALL | re.IGNORECASE)
+        # 명시적인 json 마크다운 블록을 먼저 찾습니다. (HTML 등 다른 코드 블록 오인식 방어)
+        match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL | re.IGNORECASE)
         if match:
             json_str = match.group(1)
         else:
@@ -48,28 +94,30 @@ class HCPQwenService:
             else:
                 json_str = text
             
-        # [토큰 잘림 방어 로직] 강제 닫기 시도용 헬퍼 함수
-        def try_parse(j_str):
-            try:
-                return json.loads(j_str, strict=False)
-            except json.JSONDecodeError:
-                return None
-        
-        result = try_parse(json_str)
+        result = self._try_parse_json(json_str)
         if result is not None:
             return result
             
+        # [2차 방어] 마크다운 안의 내용이 파싱 실패했을 경우, 텍스트 전체에서 중괄호({}) 범위를 다시 탐색
+        if match:
+            start_idx = text.find('{')
+            end_idx = text.rfind('}')
+            if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
+                json_str = text[start_idx:end_idx+1]
+                result = self._try_parse_json(json_str)
+                if result is not None:
+                    return result
+            elif start_idx != -1:
+                json_str = text[start_idx:]
+
         # 파싱 실패 시 토큰 4400 제한에 의한 잘림(Truncation)으로 간주하고 자동 복구 시도
         logger.warning("JSON 파싱 에러 발생. 토큰 잘림으로 간주하고 자동 복구를 시도합니다.")
         
-        if not match and text.find('{') != -1:
-            json_str = text[text.find('{'):].strip()
-            
         if json_str.count('"') % 2 != 0:
             json_str += '"'
             
         for suffix in ["}", "]}", "}]}", '"}', '"]}', '"]}]}']:
-            recovered_result = try_parse(json_str + suffix)
+            recovered_result = self._try_parse_json(json_str + suffix)
             if recovered_result is not None:
                 logger.info(f"잘린 JSON 데이터를 성공적으로 복구했습니다. (추가된 접미사: {suffix})")
                 return recovered_result
@@ -124,55 +172,9 @@ class HCPQwenService:
             except Exception as e:
                 logger.warning(f"피드백 모드 동적 주입 실패: {e}")
                 
-            if css_content:
-                user_prompt += f"\n\n[🚨 1순위: 사내 HDS CSS 스타일시트 🚨]\nHTML/JSX 코드 작성 시 아래 CSS에 정의된 클래스명(.ant-btn 등)을 최우선으로 사용하여 화면을 구성하세요:\n```css\n{css_content}\n```"
-
-        # 2. OpenAI 호환 API 호출 (타임아웃 및 재시도 로직 추가)
-        # --- [LLM 하이퍼파라미터 설정] ---
-        # 최대 재시도 횟수: 일시적인 네트워크 장애나 서버 과부하 시 다시 요청할 횟수
-        max_retries = LLM_MAX_RETRIES
-        
-        # 타임아웃(초): API 응답을 기다리는 최대 시간 (복잡한 이미지 분석을 고려하여 여유 있게 설정)
-        timeout_seconds = LLM_TIMEOUT_SECONDS
-        
-        # 최대 토큰 수(Max Tokens): LLM이 생성할 수 있는 최대 텍스트 길이 (JSON 데이터 잘림 방지를 위해 2048 기본값 적용)
-        max_tokens = LLM_MAX_TOKENS
-        
-        # 온도(Temperature): 0.0 ~ 1.0 사이의 값. 정형화된 JSON 포맷을 일관되게 추출하기 위해 0.1(낮은 창의성)로 설정
-        temperature = LLM_TEMPERATURE
-        
-        def _call_api_with_retry(model_name, messages, step_name):
-            for attempt in range(max_retries):
-                try:
-                    response = self.client.chat.completions.create(
-                        model=model_name,
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        timeout=timeout_seconds
-                    )
-                    return response.choices[0].message.content or ""
-                except APITimeoutError:
-                    if attempt == max_retries - 1:
-                        raise ValueError(f"[{step_name}] LLM API 응답 시간이 초과되었습니다 ({timeout_seconds}초). 서버 상태가 혼잡할 수 있으니 잠시 후 다시 시도해 주세요.")
-                    logger.warning(f"[{step_name}] API 타임아웃 발생, 재시도 중... ({attempt + 1}/{max_retries})")
-                    time.sleep(2 ** attempt)
-                except APIStatusError as e:
-                    if e.status_code == 400 and ("token" in str(e.message).lower() or "length" in str(e.message).lower() or "context" in str(e.message).lower()):
-                        raise ValueError(f"[{step_name}] LLM의 최대 입력 토큰 제한(4400)을 초과했습니다. 화면이 너무 길거나 복잡합니다. 해상도를 줄이거나 일부 영역만 캡쳐해 주세요.")
-                    if e.status_code in [429, 500, 502, 503, 504]:
-                        if attempt == max_retries - 1:
-                            raise ValueError(f"[{step_name}] LLM API 서버 오류({e.status_code})가 지속되어 실패했습니다: {e.message}")
-                        logger.warning(f"[{step_name}] API 상태 오류({e.status_code}) 발생, 재시도 중... ({attempt + 1}/{max_retries})")
-                        time.sleep(2 ** attempt)
-                    else:
-                        raise ValueError(f"[{step_name}] LLM API 요청 오류({e.status_code}): {e.message}")
-                except APIConnectionError:
-                    if attempt == max_retries - 1:
-                        raise ValueError(f"[{step_name}] LLM API 서버에 연결할 수 없습니다. 사내망 네트워크 상태를 확인해 주세요.")
-                    logger.warning(f"[{step_name}] API 연결 오류 발생, 재시도 중... ({attempt + 1}/{max_retries})")
-                    time.sleep(2 ** attempt)
-            return ""
+        # [우선순위 1순위] 최초 생성 및 피드백 모드 모두 CSS 컨텍스트를 제공해야 Vision API가 클래스명을 정확히 추출합니다.
+        if css_content:
+            user_prompt += f"\n\n[🚨 1순위: 사내 HDS CSS 스타일시트 🚨]\nHTML/JSX 코드 작성 및 컴포넌트 타입(component_type) 지정 시 아래 CSS에 정의된 클래스명(.ant-btn 등)을 최우선으로 매핑하여 화면을 구성하세요:\n```css\n{css_content}\n```"
 
         parsed_dict = {}
         
@@ -185,15 +187,20 @@ class HCPQwenService:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ]
-            fast_output = _call_api_with_retry(self.text_model, fast_messages, "Feedback Fast-Track")
+            fast_output = self._call_api_with_retry(self.text_model, fast_messages, "Feedback Fast-Track")
             
             logger.info(f"Feedback Fast-Track 응답 길이: {len(fast_output)}자")
             parsed_dict = self._extract_json_from_text(fast_output)
             
             if "generated_html" in parsed_dict and isinstance(parsed_dict["generated_html"], str):
+                # [최종 방어] Fast-Track에서도 대화형 텍스트 오염을 막기 위한 다중 필터링 적용
                 cleaned_html = html.unescape(parsed_dict["generated_html"].strip())
-                cleaned_html = re.sub(r'^\s*```[a-zA-Z]*\n?', '', cleaned_html)
-                cleaned_html = re.sub(r'\n?```\s*$', '', cleaned_html)
+                html_match = re.search(r'```(?:html|jsx|javascript|js)?\s*(.*?)\s*```', cleaned_html, re.DOTALL | re.IGNORECASE)
+                if html_match:
+                    cleaned_html = html_match.group(1)
+                else:
+                    cleaned_html = re.sub(r'^\s*```[a-zA-Z]*\n?', '', cleaned_html)
+                    cleaned_html = re.sub(r'\n?```\s*$', '', cleaned_html)
                 parsed_dict["generated_html"] = cleaned_html
         else:
             # =================================================================
@@ -233,7 +240,7 @@ class HCPQwenService:
             ]
             
             logger.info("=== 2-Pass Pipeline: [Pass 1] Vision API 시작 ===")
-            vision_output = _call_api_with_retry(self.vision_model, vision_messages, "Pass 1")
+            vision_output = self._call_api_with_retry(self.vision_model, vision_messages, "Pass 1")
             
             # JSON 추출 (복구 로직 포함)
             parsed_dict = self._extract_json_from_text(vision_output)
@@ -266,18 +273,18 @@ class HCPQwenService:
                 {"role": "user", "content": text_user_prompt}
             ]
             
-            text_output = _call_api_with_retry(self.text_model, text_messages, "Pass 2")
+            text_output = self._call_api_with_retry(self.text_model, text_messages, "Pass 2")
 
             # 3. 데이터 병합
             # --- [디버깅 로그: JSON 잘림 현상 확인용] ---
-            token_limit_msg = max_tokens if max_tokens else "무제한 (AI 모델 물리적 최대치)"
+            token_limit_msg = LLM_MAX_TOKENS if LLM_MAX_TOKENS else "무제한 (AI 모델 물리적 최대치)"
             logger.info(f"설정된 최대 허용 토큰 수(Max Tokens): {token_limit_msg}")
             logger.info(f"Pass 1 (Vision) 응답 길이: {len(vision_output)}자")
             logger.info(f"Pass 2 (Text) 응답 길이: {len(text_output)}자")
             
             # Pass 2 응답이 프롬프트 지시를 무시하고 JSON 포맷으로 돌아왔을 경우를 대비한 방어 로직
             pass2_raw_html = text_output.strip()
-            if pass2_raw_html.startswith("{") and "generated_html" in pass2_raw_html:
+            if "{" in pass2_raw_html and "generated_html" in pass2_raw_html:
                 try:
                     fallback_json = self._extract_json_from_text(pass2_raw_html)
                     if "generated_html" in fallback_json:
@@ -285,11 +292,16 @@ class HCPQwenService:
                 except Exception:
                     pass
             
-            # Pass 2의 코드 결과물을 파싱된 딕셔너리에 병합
-            cleaned_html = html.unescape(pass2_raw_html)
-            cleaned_html = re.sub(r'^\s*```[a-zA-Z]*\n?', '', cleaned_html)
-            cleaned_html = re.sub(r'\n?```\s*$', '', cleaned_html)
-            parsed_dict["generated_html"] = cleaned_html
+            # [최종 방어] LLM이 쓸데없는 대화형 텍스트("여기 코드입니다~")를 코드 블록 위아래에 붙였을 경우 알맹이만 추출
+            cleaned_html = html.unescape(pass2_raw_html.strip())
+            html_match = re.search(r'```(?:html|jsx|javascript|js)?\s*(.*?)\s*```', cleaned_html, re.DOTALL | re.IGNORECASE)
+            if html_match:
+                cleaned_html = html_match.group(1)
+            else:
+                cleaned_html = re.sub(r'^\s*```[a-zA-Z]*\n?', '', cleaned_html)
+                cleaned_html = re.sub(r'\n?```\s*$', '', cleaned_html)
+            
+            parsed_dict["generated_html"] = cleaned_html.strip()
             
         # 4. 최종 Pydantic 검증 (Fast-Track 및 2-Pass 공통)
         try:

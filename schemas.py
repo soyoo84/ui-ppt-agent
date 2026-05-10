@@ -2,9 +2,11 @@ import re
 from pydantic import BaseModel, Field, model_validator
 from typing import List, Optional, Any
 
+NUMBER_PATTERN = re.compile(r'-?\d+(\.\d+)?')
+
 class UIComponent(BaseModel):
     component_id: Optional[str] = Field(default="", description="컴포넌트의 고유 ID (예: btn-login-01, input-email-01)")
-    component_type: Optional[str] = Field(default="Box", description="TO-BE 컴포넌트 타입 (AI가 화면에 맞게 PrimaryButton, Slider, Calendar 등 PascalCase로 자유롭게 명명)")
+    component_type: Optional[str] = Field(default="Box", description="TO-BE 컴포넌트 타입 (AI가 화면에 맞게 ant-btn-primary, ag-header 등 CSS 클래스 네이밍 규칙에 따라 명명)")
     text: Optional[str] = Field(default="", description="컴포넌트 내부에 들어갈 텍스트 (예: '로그인', '아이디를 입력하세요')")
     event_description: Optional[str] = Field(default="", description="컴포넌트 클릭 등 이벤트 발생 시 동작할 세부 기능 설명")
     x_percent: Optional[float] = Field(default=0.0, description="화면 좌측 상단 기준 X 좌표 비율 (0.0 ~ 1.0)")
@@ -20,7 +22,7 @@ class UIComponent(BaseModel):
             for key in ['x_percent', 'y_percent', 'width_percent', 'height_percent']:
                 val = data.get(key)
                 if isinstance(val, str):
-                    match = re.search(r'-?\d+(\.\d+)?', val)
+                    match = NUMBER_PATTERN.search(val)
                     if match:
                         data[key] = float(match.group())
                     else:

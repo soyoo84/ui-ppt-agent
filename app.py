@@ -152,18 +152,31 @@ with col1:
                 
             st.markdown("---")
             with st.expander("🛠️ 관리자 도구 (디자인 토큰 자동 추출)"):
-                st.markdown("현재 선택된 **PPT 템플릿** 내부의 도형들을 스캔하여 `components_registry.json`에 자동으로 등록합니다.\n*(※ 인식 방법: 1. 도형의 객체 이름을 영문(예: HdsButton)으로 변경하거나, 2. 도형 안에 HdsButton 이라고 적어두면 스캔됩니다.)*")
-                if st.button("🪄 템플릿에서 디자인 토큰 스캔", use_container_width=True):
-                    if selected_template_path:
-                        from ppt_service import sync_design_tokens_from_ppt
-                        with st.spinner("PPT 파일을 스캔하여 속성을 추출하는 중..."):
-                            count, msg = sync_design_tokens_from_ppt(selected_template_path)
+                st.markdown("현재 선택된 **PPT 템플릿**이나 **hds.css 파일**을 스캔하여 `components_registry.json`에 자동으로 등록합니다.")
+                
+                col_admin1, col_admin2 = st.columns(2)
+                with col_admin1:
+                    if st.button("🪄 PPT 템플릿 스캔", use_container_width=True):
+                        if selected_template_path:
+                            from ppt_service import sync_design_tokens_from_ppt
+                            with st.spinner("PPT 파일을 스캔하여 속성을 추출하는 중..."):
+                                count, msg = sync_design_tokens_from_ppt(selected_template_path)
+                                if count > 0:
+                                    st.success(f"🎉 성공! {count}개의 도형 스타일이 JSON에 저장되었습니다.")
+                                else:
+                                    st.warning(f"추출된 토큰이 없습니다. (사유: {msg})")
+                        else:
+                            st.error("먼저 PPT 템플릿을 선택해 주세요.")
+                            
+                with col_admin2:
+                    if st.button("🎨 CSS 클래스 스캔", use_container_width=True):
+                        from ppt_service import sync_design_tokens_from_css
+                        with st.spinner("CSS 파일을 스캔하여 속성을 추출하는 중..."):
+                            count, msg = sync_design_tokens_from_css("hds.css")
                             if count > 0:
-                                st.success(f"🎉 성공! {count}개의 컴포넌트 스타일이 성공적으로 추출되어 JSON에 저장되었습니다.")
+                                st.success(f"🎉 성공! {count}개의 CSS 클래스가 JSON에 저장되었습니다.")
                             else:
-                                st.warning(f"추출된 토큰이 없습니다. 스캔할 도형의 객체 이름을 변경하거나 텍스트를 적어두었는지 확인해 주세요. (사유: {msg})")
-                    else:
-                        st.error("먼저 위의 '적용할 PPT 템플릿'을 선택해 주세요.")
+                                st.warning(f"추출된 CSS 스타일이 없습니다. (사유: {msg})")
 
 # 공통 PPT 생성 함수 (버튼 및 채팅창에서 호출)
 def generate_and_render_ppt(img_bytes, prompt_text, prev_json, feedback_msg, template_path=None, layout_name=None) -> bool:
@@ -232,8 +245,10 @@ def generate_and_render_ppt(img_bytes, prompt_text, prev_json, feedback_msg, tem
             st.session_state["generated_data"] = {
                 "ppt": ppt_stream.getvalue(),
                 "html_str": html_content,
+                "raw_html": analysis_result.generated_html,
                 "json_str": json_content,
-                "components": analysis_result.components
+                "components": analysis_result.components,
+                "screen_name": analysis_result.screen_name
             }
             st.session_state["last_json"] = json_content
             elapsed = round(time.time() - start_time, 1)
@@ -252,6 +267,10 @@ with col2:
         if not st.session_state.get("generated_data"):
             if st.button("🚀 PPT 생성 시작", use_container_width=True):
                 st.session_state["generated_data"] = None
+                generate_and_render_ppt(image_bytes, custom_prompt, None, None, selected_template_path, selected_layout_name)
+        else:
+            # 이미 생성된 후, 좌측의 고급 설정(프롬프트, 템플릿)을 변경하고 다시 생성하고 싶을 때를 위한 버튼
+            if st.button("🔄 새로운 설정으로 다시 생성", use_container_width=True):
                 generate_and_render_ppt(image_bytes, custom_prompt, None, None, selected_template_path, selected_layout_name)
                 
         # 결과 렌더링
@@ -284,7 +303,7 @@ with col2:
                 with tabs[0]:
                     st.components.v1.html(html_for_preview, height=450, scrolling=True)
                 with tabs[1]:
-                    st.code(data["html_str"], language=code_lang)
+                    st.code(data.get("raw_html", data["html_str"]), language=code_lang)
                 with tabs[2]:
                     st.code(data["json_str"], language="json")
                 if css_content:
@@ -294,7 +313,9 @@ with col2:
                 st.markdown("---")
                 st.subheader("📥 개별 파일 다운로드")
                 
-                base_name = os.path.splitext(image_name)[0] if image_name else "generated_ui"
+                # [UX 최적화] AI가 지어준 화면 이름(screen_name)을 파일명으로 활용하여 직관성 향상
+                safe_screen_name = re.sub(r'[\\/*?:"<>|]', "_", data.get("screen_name", "UI_Screen"))
+                base_name = safe_screen_name.replace(" ", "_")
                 
                 # CSV 데이터 생성 (엑셀 호환을 위해 utf-8-sig 인코딩)
                 csv_buffer = io.StringIO(newline='')
@@ -309,9 +330,12 @@ with col2:
 
                 # CSS 존재 여부에 따라 다운로드 버튼을 동적으로 꽉 차게 배치 (중간 빈 공백 제거)
                 dl_buttons = [
-                    ("📊 PPT 다운로드", data["ppt"], f"UI_정의서_{base_name}.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
-                    ("🌐 HTML 다운로드", data["html_str"], f"index_{base_name}.html", "text/html")
+                    ("📊 PPT 다운로드", data["ppt"], f"UI_정의서_{base_name}.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation")
                 ]
+                if "React" in custom_prompt:
+                    dl_buttons.append(("⚛️ React(JSX) 다운로드", data.get("raw_html", ""), f"{base_name}.jsx", "text/plain"))
+                else:
+                    dl_buttons.append(("🌐 HTML 다운로드", data["html_str"], f"index_{base_name}.html", "text/html"))
                 if css_content:
                     dl_buttons.append(("🎨 CSS 다운로드", css_content, "hds.css", "text/css"))
                 dl_buttons.extend([

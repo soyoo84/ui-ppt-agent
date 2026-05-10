@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import datetime
+import re
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
@@ -15,6 +16,29 @@ from config import (
 from prompts import get_component_registry
 
 logger = logging.getLogger(__name__)
+
+# --- [유틸리티 헬퍼 함수 모음] ---
+def _safe_rgb(val, default_rgb):
+    """[안전 방어] JSON 휴먼 에러(타입 오타, 값 누락)를 방어하는 RGB 헬퍼 함수"""
+    if isinstance(val, list) and len(val) >= 3:
+        try:
+            return RGBColor(max(0, min(255, int(val[0]))), max(0, min(255, int(val[1]))), max(0, min(255, int(val[2]))))
+        except Exception: pass
+    return RGBColor(*default_rgb)
+
+def _hex_to_rgb(hex_color):
+    hex_color = hex_color.lstrip('#')
+    if len(hex_color) == 3: hex_color = ''.join([c*2 for c in hex_color])
+    if len(hex_color) == 6: return [int(hex_color[i:i+2], 16) for i in (0, 2, 4)]
+    return None
+
+def _parse_color(color_str):
+    color_str = color_str.strip().lower()
+    if color_str.startswith('#'): return _hex_to_rgb(color_str)
+    elif color_str.startswith('rgb'):
+        match = re.search(r'rgba?\((\d+),\s*(\d+),\s*(\d+)', color_str)
+        if match: return [int(match.group(1)), int(match.group(2)), int(match.group(3))]
+    return None
 
 def get_layout_names(template_path):
     """PPT 템플릿 파일에서 슬라이드 레이아웃 이름 목록을 추출합니다."""
@@ -147,7 +171,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
 
     # --- [Z-Index 보정 알고리즘 추가] ---
     # 모달, 툴팁, 드롭다운 등 화면에 떠 있는(Floating) 요소들이 다른 도형에 가려지지 않도록 가장 마지막(최상단)에 그립니다.
-    floating_types = {"Modal", "HdsModal", "Dialog", "Tooltip", "HdsTooltip", "Popover", "Dropdown", "Select", "HdsSelect", "HdsDropdown"}
+    floating_types = {"Modal", "HdsModal", "Dialog", "ant-modal", "Tooltip", "HdsTooltip", "Popover", "ant-tooltip", "ant-tooltip-inner", "Dropdown", "Select", "HdsSelect", "HdsDropdown", "ant-select", "ant-dropdown"}
     regular_comps = [c for c in analysis_result.components if c.component_type not in floating_types]
     floating_comps = [c for c in analysis_result.components if c.component_type in floating_types]
     
@@ -169,7 +193,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
         width = max(int(Inches(0.5)), width)
         height = max(int(Inches(0.3)), height)
 
-        if comp.component_type in ("PrimaryButton", "Button", "HdsButton"):
+        if comp.component_type in ("PrimaryButton", "Button", "HdsButton", "ant-btn", "ant-btn-primary", "ant-btn-default"):
             # 둥근 모서리 사각형 (MSO_SHAPE.ROUNDED_RECTANGLE = 5)
             shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height)
             shape.fill.solid()
@@ -183,7 +207,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             tf.paragraphs[0].font.bold = True
             tf.paragraphs[0].font.size = Pt(14)
             
-        elif comp.component_type in ("Tooltip", "HdsTooltip", "Popover"):
+        elif comp.component_type in ("Tooltip", "HdsTooltip", "Popover", "ant-tooltip", "ant-tooltip-inner"):
             # Ant Design 스타일의 Tooltip (어두운 배경의 말풍선 형태)
             shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height)
             shape.fill.solid()
@@ -197,7 +221,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             tf.paragraphs[0].font.color.rgb = RGBColor(255, 255, 255)
             tf.paragraphs[0].font.size = Pt(10)
             
-        elif comp.component_type in ("ProgressBar", "Progress", "HdsProgress", "HdsProgressBar"):
+        elif comp.component_type in ("ProgressBar", "Progress", "HdsProgress", "HdsProgressBar", "ant-progress", "ant-progress-bg"):
             # Ant Design 스타일의 Progress Bar (배경 트랙 + 메인 컬러 채움)
             bg_shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height)
             bg_shape.fill.solid()
@@ -210,7 +234,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             fg_shape.fill.fore_color.rgb = RGBColor(*HDS_PRIMARY_COLOR)
             fg_shape.line.color.rgb = RGBColor(*HDS_PRIMARY_COLOR)
             
-        elif comp.component_type in ("TextInput", "Input", "HdsInput", "TextArea"):
+        elif comp.component_type in ("TextInput", "Input", "HdsInput", "TextArea", "ant-input"):
             # 일반 사각형 테두리 (MSO_SHAPE.RECTANGLE = 1)
             shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
             shape.fill.solid()
@@ -224,7 +248,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             tf.paragraphs[0].alignment = PP_ALIGN.LEFT
             tf.paragraphs[0].font.color.rgb = RGBColor(150, 150, 150)
             
-        elif comp.component_type in ("Dropdown", "Select", "HdsSelect", "HdsDropdown"):
+        elif comp.component_type in ("Dropdown", "Select", "HdsSelect", "HdsDropdown", "ant-select", "ant-dropdown"):
             # Ant Design 스타일의 Select/Dropdown (우측에 ▼ 화살표 추가)
             shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
             shape.fill.solid()
@@ -239,7 +263,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             tf.paragraphs[0].font.color.rgb = RGBColor(80, 80, 80)
             tf.paragraphs[0].font.size = Pt(12)
             
-        elif comp.component_type in ("AgGrid", "Table", "DataGrid", "DataTable", "Grid", "HdsDataGrid"):
+        elif comp.component_type in ("AgGrid", "Table", "DataGrid", "DataTable", "Grid", "HdsDataGrid", "ag-root-wrapper", "ant-table"):
             # 데이터 그리드를 확실한 표(Table) 형태로 렌더링
             # 3행 4열의 기본 표를 생성하여 시각적으로 풍부하게 표현
             table_shape = slide.shapes.add_table(3, 4, left, top, width, height)
@@ -261,7 +285,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
                     cell.text_frame.paragraphs[0].font.color.rgb = RGBColor(80, 80, 80)
                     cell.vertical_anchor = MSO_ANCHOR.MIDDLE
                     
-        elif comp.component_type in ("DatePicker", "HdsDatePicker", "Calendar"):
+        elif comp.component_type in ("DatePicker", "HdsDatePicker", "Calendar", "ant-picker"):
             # Ant Design 스타일의 DatePicker (입력창 + 우측 달력 아이콘)
             shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
             shape.fill.solid()
@@ -276,7 +300,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             tf.paragraphs[0].font.color.rgb = RGBColor(100, 100, 100)
             tf.paragraphs[0].font.size = Pt(12)
             
-        elif comp.component_type in ("AgGridToolbar", "TableToolbar", "GridToolbar", "Toolbar", "HdsDataGridToolbar"):
+        elif comp.component_type in ("AgGridToolbar", "TableToolbar", "GridToolbar", "Toolbar", "HdsDataGridToolbar", "ag-header"):
             # AG Grid 상단 툴바 (우측 정렬된 액션 버튼이나 검색창 표현)
             txBox = slide.shapes.add_textbox(left, top, width, height)
             tf = txBox.text_frame
@@ -287,7 +311,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             tf.paragraphs[0].font.size = Pt(11)
             tf.paragraphs[0].font.bold = True
             
-        elif comp.component_type in ("AgGridPagination", "TablePagination", "GridPagination", "Pagination", "HdsPagination"):
+        elif comp.component_type in ("AgGridPagination", "TablePagination", "GridPagination", "Pagination", "HdsPagination", "ant-pagination"):
             # AG Grid 하단 페이징 영역 (가운데 정렬된 페이지 번호)
             shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
             shape.fill.solid()
@@ -300,7 +324,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             tf.paragraphs[0].font.color.rgb = RGBColor(100, 100, 100)
             tf.paragraphs[0].font.size = Pt(11)
             
-        elif comp.component_type in ("Checkbox", "HdsCheckbox"):
+        elif comp.component_type in ("Checkbox", "HdsCheckbox", "ant-checkbox", "ant-checkbox-wrapper", "ant-checkbox-checked"):
             # Checkbox: 텍스트 박스를 그리고 좌측에 체크박스 특수문자(☑ 또는 ☐) 삽입
             txBox = slide.shapes.add_textbox(left, top, width, height)
             tf = txBox.text_frame
@@ -312,7 +336,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             tf.paragraphs[0].font.color.rgb = RGBColor(50, 50, 50)
             tf.paragraphs[0].font.size = Pt(12)
             
-        elif comp.component_type in ("ToggleSwitch", "Switch", "HdsSwitch"):
+        elif comp.component_type in ("ToggleSwitch", "Switch", "HdsSwitch", "ant-switch", "ant-switch-checked"):
             # Ant Design 스타일의 Toggle Switch (활성화 상태 표현)
             shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height) # 둥근 사각형
             shape.fill.solid()
@@ -324,7 +348,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             tf.paragraphs[0].alignment = PP_ALIGN.RIGHT
             tf.paragraphs[0].font.color.rgb = RGBColor(255, 255, 255)
             
-        elif comp.component_type in ("RadioButton", "Radio", "HdsRadio"):
+        elif comp.component_type in ("RadioButton", "Radio", "HdsRadio", "ant-radio", "ant-radio-wrapper", "ant-radio-checked"):
             # Ant Design 스타일의 Radio Button (동그란 라디오 버튼 + 텍스트)
             txBox = slide.shapes.add_textbox(left, top, width, height)
             tf = txBox.text_frame
@@ -335,7 +359,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             tf.paragraphs[0].font.color.rgb = RGBColor(50, 50, 50)
             tf.paragraphs[0].font.size = Pt(12)
             
-        elif comp.component_type in ("Modal", "HdsModal", "Dialog"):
+        elif comp.component_type in ("Modal", "HdsModal", "Dialog", "ant-modal"):
             # Ant Design 스타일의 모달(Modal) 창 (팝업 컨테이너)
             shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
             shape.fill.solid()
@@ -382,31 +406,27 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             if not isinstance(shape_name, str): shape_name = "RECTANGLE"
             shape_enum = getattr(MSO_SHAPE, shape_name, MSO_SHAPE.RECTANGLE)
             
-            # [안전 방어] JSON 휴먼 에러(타입 오타, 값 누락)를 방어하는 RGB 헬퍼 함수
-            def safe_rgb(val, default_rgb):
-                if isinstance(val, list) and len(val) >= 3:
-                    try:
-                        return RGBColor(max(0, min(255, int(val[0]))), max(0, min(255, int(val[1]))), max(0, min(255, int(val[2]))))
-                    except Exception: pass
-                return RGBColor(*default_rgb)
-
             shape = slide.shapes.add_shape(shape_enum, left, top, width, height)
             shape.fill.solid()
-            shape.fill.fore_color.rgb = safe_rgb(style.get("bg"), (245, 245, 255))
-            shape.line.color.rgb = safe_rgb(style.get("line"), (150, 150, 200))
+            shape.fill.fore_color.rgb = _safe_rgb(style.get("bg"), (245, 245, 255))
+            shape.line.color.rgb = _safe_rgb(style.get("line"), (150, 150, 200))
             
             tf = shape.text_frame
             safe_text = comp.text if comp.text else ""
             tf.text = f"[{comp.component_type}]\n{safe_text}".strip()
             tf.word_wrap = True
             tf.paragraphs[0].alignment = PP_ALIGN.CENTER
-            tf.paragraphs[0].font.color.rgb = safe_rgb(style.get("text"), (100, 100, 150))
+            tf.paragraphs[0].font.color.rgb = _safe_rgb(style.get("text"), (100, 100, 150))
             
             try: font_size = int(style.get("size", 12))
             except Exception: font_size = 12
             tf.paragraphs[0].font.size = Pt(font_size)
             
-            tf.paragraphs[0].font.bold = bool(style.get("bold", False))
+            bold_val = style.get("bold", False)
+            if isinstance(bold_val, str):
+                tf.paragraphs[0].font.bold = bold_val.strip().lower() in ("true", "1", "yes", "t")
+            else:
+                tf.paragraphs[0].font.bold = bool(bold_val)
 
     # --- [우측 화면 설명(Description) 영역 추가 시작] ---
     desc_left = int(actual_slide_width * 0.72)
@@ -486,8 +506,8 @@ def sync_design_tokens_from_ppt(template_path):
                 comp_name = None
                 
                 # 1. PPT 도형의 고유 '이름(Name)' 속성 확인 (선택 창에서 변경한 커스텀 이름)
-                # 기본 이름(예: "Rectangle 1", "직사각형 3")에는 띄어쓰기가 있는 점을 이용해 필터링
-                if shape.name and " " not in shape.name and shape.name.isascii() and shape.name[0].isupper():
+                # 영문자, 숫자, 하이픈(-), 언더바(_) 조합인지 정규식으로 유연하게 확인
+                if shape.name and re.match(r'^[A-Za-z0-9_-]{3,}$', shape.name):
                     comp_name = shape.name
                     
                 # 2. 도형 내부 텍스트 확인 ([HdsButton] 또는 HdsButton)
@@ -495,7 +515,7 @@ def sync_design_tokens_from_ppt(template_path):
                     text = shape.text.strip()
                     if text.startswith("[") and "]" in text:
                         comp_name = text[1:text.find("]")]
-                    elif text and " " not in text and text.isascii() and text[0].isupper():
+                    elif text and re.match(r'^[A-Za-z0-9_-]{3,}$', text):
                         comp_name = text
                         
                 if not comp_name:
@@ -543,6 +563,9 @@ def sync_design_tokens_from_ppt(template_path):
                 except Exception: pass
                 
                 # 5. 레지스트리 병합(Merge) 저장
+                if comp_name in registry and registry[comp_name].get("locked") is True:
+                    continue # 잠금(Lock) 설정된 컴포넌트는 업데이트 스킵
+                    
                 if comp_name not in registry:
                     registry[comp_name] = {"guide": "", "ppt_style": {}}
                     
@@ -559,4 +582,59 @@ def sync_design_tokens_from_ppt(template_path):
         return updated_count, "성공"
     except Exception as e:
         logger.error(f"디자인 토큰 스캔 중 오류: {e}", exc_info=True)
+        return 0, str(e)
+
+def sync_design_tokens_from_css(css_path="hds.css"):
+    """CSS 파일의 속성을 파싱하여 components_registry.json의 ppt_style을 자동 업데이트합니다."""
+    if not os.path.exists(css_path):
+        return 0, "hds.css 파일을 찾을 수 없습니다."
+        
+    try:
+        with open(css_path, "r", encoding="utf-8") as f:
+            css_content = f.read()
+            
+        registry = get_component_registry()
+        updated_count = 0
+        
+        # CSS 블록 추출 (예: .ant-btn-primary { background-color: #E60012; })
+        blocks = re.findall(r'\.([a-zA-Z0-9_-]+)\s*\{([^}]*)\}', css_content)
+        
+        for class_name, block_content in blocks:
+            bg_match = re.search(r'background(?:-color)?\s*:\s*([^;!]+)', block_content)
+            text_match = re.search(r'(?<!-|\w)color\s*:\s*([^;!]+)', block_content)
+            border_match = re.search(r'border(?:-color)?\s*:\s*([^;!]+)', block_content)
+            
+            bg_color = _parse_color(bg_match.group(1)) if bg_match else None
+            text_color = _parse_color(text_match.group(1)) if text_match else None
+            line_color = None
+            if border_match:
+                hex_in_border = re.search(r'#[0-9a-fA-F]+', border_match.group(1))
+                if hex_in_border: line_color = _hex_to_rgb(hex_in_border.group(0))
+                else: line_color = _parse_color(border_match.group(1))
+                
+            if bg_color or text_color or line_color:
+                if class_name in registry and registry[class_name].get("locked") is True:
+                    continue # 잠금(Lock) 설정된 컴포넌트는 업데이트 스킵
+                    
+                if class_name not in registry:
+                    registry[class_name] = {"guide": f"CSS 클래스 .{class_name} 기반 컴포넌트", "ppt_style": {}}
+                
+                ppt_style = registry[class_name].get("ppt_style", {})
+                if "shape" not in ppt_style:
+                    ppt_style["shape"] = "ROUNDED_RECTANGLE" if "btn" in class_name else "RECTANGLE"
+                    
+                if bg_color: ppt_style["bg"] = bg_color
+                if text_color: ppt_style["text"] = text_color
+                if line_color: ppt_style["line"] = line_color
+                
+                registry[class_name]["ppt_style"] = ppt_style
+                updated_count += 1
+                
+        if updated_count > 0:
+            with open("components_registry.json", "w", encoding="utf-8") as f:
+                json.dump(registry, f, ensure_ascii=False, indent=4)
+                
+        return updated_count, "성공"
+    except Exception as e:
+        logger.error(f"CSS 스캔 중 오류: {e}", exc_info=True)
         return 0, str(e)
