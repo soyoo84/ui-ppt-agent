@@ -1,5 +1,6 @@
+import re
 from pydantic import BaseModel, Field, model_validator
-from typing import List, Optional
+from typing import List, Optional, Any
 
 class UIComponent(BaseModel):
     component_id: Optional[str] = Field(default="", description="컴포넌트의 고유 ID (예: btn-login-01, input-email-01)")
@@ -10,6 +11,21 @@ class UIComponent(BaseModel):
     y_percent: Optional[float] = Field(default=0.0, description="화면 좌측 상단 기준 Y 좌표 비율 (0.0 ~ 1.0)")
     width_percent: Optional[float] = Field(default=0.1, description="요소의 너비 비율 (0.0 ~ 1.0)")
     height_percent: Optional[float] = Field(default=0.1, description="요소의 높이 비율 (0.0 ~ 1.0)")
+
+    @model_validator(mode='before')
+    @classmethod
+    def preprocess_percentages(cls, data: Any):
+        if isinstance(data, dict):
+            # LLM이 실수 대신 "50%", "0.5px" 같은 문자열 단위를 붙여 반환했을 때 숫자만 추출 (ValidationError 사전 차단)
+            for key in ['x_percent', 'y_percent', 'width_percent', 'height_percent']:
+                val = data.get(key)
+                if isinstance(val, str):
+                    match = re.search(r'-?\d+(\.\d+)?', val)
+                    if match:
+                        data[key] = float(match.group())
+                    else:
+                        data[key] = None # 변환 실패 시 None으로 넘겨서 after 로직의 기본값이 적용되도록 함
+        return data
 
     @model_validator(mode='after')
     def normalize_percentages(self):
@@ -43,6 +59,16 @@ class ScreenAnalysisResult(BaseModel):
     screen_description: Optional[str] = Field(default="", description="해당 화면의 주요 기능, 목적, 정책 등에 대한 상세 설명")
     generated_html: Optional[str] = Field(default="", description="Ant Design 클래스명을 사용한 HTML DOM 구조 코드")
     components: Optional[List[UIComponent]] = Field(default_factory=list, description="화면에서 추출된 TO-BE UI 컴포넌트 목록")
+
+    @model_validator(mode='before')
+    @classmethod
+    def preprocess_screen_data(cls, data: Any):
+        if isinstance(data, dict):
+            comps = data.get('components')
+            # LLM이 배열([])이 아닌 단일 객체({})로 컴포넌트를 1개만 반환했을 경우 강제로 배열로 감싸줌
+            if isinstance(comps, dict):
+                data['components'] = [comps]
+        return data
 
     @model_validator(mode='after')
     def normalize_screen_data(self):

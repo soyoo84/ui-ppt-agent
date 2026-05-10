@@ -1,4 +1,6 @@
 import os
+import json
+import logging
 import datetime
 from pptx import Presentation
 from pptx.util import Inches, Pt
@@ -10,6 +12,9 @@ from config import (
     MASTER_PPT_PATH, TARGET_LAYOUT_NAME, PPT_SLIDE_WIDTH, PPT_SLIDE_HEIGHT, PPT_UI_SCALE,
     PPT_TOP_OFFSET_RATIO, PPT_ALIGN_THRESHOLD, PPT_CONTAINER_PADDING, HDS_PRIMARY_COLOR
 )
+from prompts import get_component_registry
+
+logger = logging.getLogger(__name__)
 
 def get_layout_names(template_path):
     """PPT 템플릿 파일에서 슬라이드 레이아웃 이름 목록을 추출합니다."""
@@ -367,19 +372,41 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             tf.paragraphs[0].font.color.rgb = RGBColor(150, 150, 150)
             
         else:
-            # [자동화 폴백] 사전에 정의되지 않은 새로운 컴포넌트 타입이 들어올 경우의 범용 렌더링
-            shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
+            # [자동화 폴백] 외부 JSON 통합 레지스트리를 스캔하여 자동 스타일링 렌더링
+            registry = get_component_registry()
+            comp_data = registry.get(comp.component_type, registry.get("Default", {}))
+            style = comp_data.get("ppt_style", registry.get("Default", {}).get("ppt_style", {}))
+            
+            # JSON의 문자열("ROUNDED_RECTANGLE" 등)을 파이썬 MSO_SHAPE 객체로 변환 (오타 시 RECTANGLE 롤백)
+            shape_name = style.get("shape", "RECTANGLE")
+            if not isinstance(shape_name, str): shape_name = "RECTANGLE"
+            shape_enum = getattr(MSO_SHAPE, shape_name, MSO_SHAPE.RECTANGLE)
+            
+            # [안전 방어] JSON 휴먼 에러(타입 오타, 값 누락)를 방어하는 RGB 헬퍼 함수
+            def safe_rgb(val, default_rgb):
+                if isinstance(val, list) and len(val) >= 3:
+                    try:
+                        return RGBColor(max(0, min(255, int(val[0]))), max(0, min(255, int(val[1]))), max(0, min(255, int(val[2]))))
+                    except Exception: pass
+                return RGBColor(*default_rgb)
+
+            shape = slide.shapes.add_shape(shape_enum, left, top, width, height)
             shape.fill.solid()
-            shape.fill.fore_color.rgb = RGBColor(245, 245, 255) # 연한 푸른빛 배경
-            shape.line.color.rgb = RGBColor(150, 150, 200) # 푸른빛 테두리
+            shape.fill.fore_color.rgb = safe_rgb(style.get("bg"), (245, 245, 255))
+            shape.line.color.rgb = safe_rgb(style.get("line"), (150, 150, 200))
             
             tf = shape.text_frame
             safe_text = comp.text if comp.text else ""
-            tf.text = f"[{comp.component_type}] {safe_text}"
+            tf.text = f"[{comp.component_type}]\n{safe_text}".strip()
             tf.word_wrap = True
             tf.paragraphs[0].alignment = PP_ALIGN.CENTER
-            tf.paragraphs[0].font.color.rgb = RGBColor(100, 100, 150)
-            tf.paragraphs[0].font.size = Pt(12)
+            tf.paragraphs[0].font.color.rgb = safe_rgb(style.get("text"), (100, 100, 150))
+            
+            try: font_size = int(style.get("size", 12))
+            except Exception: font_size = 12
+            tf.paragraphs[0].font.size = Pt(font_size)
+            
+            tf.paragraphs[0].font.bold = bool(style.get("bold", False))
 
     # --- [우측 화면 설명(Description) 영역 추가 시작] ---
     desc_left = int(actual_slide_width * 0.72)
@@ -400,7 +427,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
     tf_desc.margin_bottom = Inches(0.15)
     
     p_title = tf_desc.paragraphs[0]
-    p_title.text = "📌 화면 설명 및 정책"
+    p_title.text = "📌 UI 화면 설명 및 퍼블리싱 정책"
     p_title.font.bold = True
     p_title.font.size = Pt(14)
     p_title.font.color.rgb = RGBColor(30, 30, 30)
@@ -443,3 +470,93 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
 
     # 지정된 경로에 파일 저장
     prs.save(output_file)
+
+def sync_design_tokens_from_ppt(template_path):
+    """PPT 템플릿의 도형을 스캔하여 components_registry.json의 ppt_style을 자동 추출/업데이트합니다."""
+    if not template_path or not os.path.exists(template_path):
+        return 0, "PPT 파일을 찾을 수 없습니다."
+        
+    try:
+        prs = Presentation(template_path)
+        registry = get_component_registry()
+        updated_count = 0
+        
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                comp_name = None
+                
+                # 1. PPT 도형의 고유 '이름(Name)' 속성 확인 (선택 창에서 변경한 커스텀 이름)
+                # 기본 이름(예: "Rectangle 1", "직사각형 3")에는 띄어쓰기가 있는 점을 이용해 필터링
+                if shape.name and " " not in shape.name and shape.name.isascii() and shape.name[0].isupper():
+                    comp_name = shape.name
+                    
+                # 2. 도형 내부 텍스트 확인 ([HdsButton] 또는 HdsButton)
+                if not comp_name and shape.has_text_frame:
+                    text = shape.text.strip()
+                    if text.startswith("[") and "]" in text:
+                        comp_name = text[1:text.find("]")]
+                    elif text and " " not in text and text.isascii() and text[0].isupper():
+                        comp_name = text
+                        
+                if not comp_name:
+                    continue
+                
+                # 1. 형태(Shape) 스캔
+                shape_str = "RECTANGLE"
+                if hasattr(shape, "auto_shape_type") and shape.auto_shape_type:
+                    # MSO_SHAPE 열거형 값(정수)을 다시 문자열 이름("ROUNDED_RECTANGLE" 등)으로 역변환
+                    for key in dir(MSO_SHAPE):
+                        if not key.startswith("_") and getattr(MSO_SHAPE, key) == shape.auto_shape_type:
+                            shape_str = key
+                            break
+                    
+                # 2. 배경색(Fill) 스캔
+                bg_color = [245, 245, 255]
+                try:
+                    if hasattr(shape.fill, "fore_color") and hasattr(shape.fill.fore_color, "rgb") and shape.fill.fore_color.rgb:
+                        rgb = shape.fill.fore_color.rgb
+                        bg_color = [rgb[0], rgb[1], rgb[2]]
+                except Exception: pass
+                
+                # 3. 테두리색(Line) 스캔
+                line_color = [200, 200, 200]
+                try:
+                    if hasattr(shape.line, "color") and hasattr(shape.line.color, "rgb") and shape.line.color.rgb:
+                        rgb = shape.line.color.rgb
+                        line_color = [rgb[0], rgb[1], rgb[2]]
+                except Exception: pass
+                
+                # 4. 텍스트 색상 및 폰트 속성 스캔
+                text_color = [50, 50, 50]
+                font_size = 12
+                font_bold = False
+                try:
+                    if shape.has_text_frame and shape.text_frame.paragraphs:
+                        font = shape.text_frame.paragraphs[0].font
+                        if hasattr(font, "color") and hasattr(font.color, "rgb") and font.color.rgb:
+                            rgb = font.color.rgb
+                            text_color = [rgb[0], rgb[1], rgb[2]]
+                        if font.size:
+                            font_size = int(font.size.pt)
+                        if font.bold is not None:
+                            font_bold = font.bold
+                except Exception: pass
+                
+                # 5. 레지스트리 병합(Merge) 저장
+                if comp_name not in registry:
+                    registry[comp_name] = {"guide": "", "ppt_style": {}}
+                    
+                registry[comp_name]["ppt_style"] = {
+                    "shape": shape_str, "bg": bg_color, "line": line_color, 
+                    "text": text_color, "size": font_size, "bold": font_bold
+                }
+                updated_count += 1
+                    
+        # 추출된 데이터가 있으면 JSON 파일 덮어쓰기
+        if updated_count > 0:
+            with open("components_registry.json", "w", encoding="utf-8") as f:
+                json.dump(registry, f, ensure_ascii=False, indent=4)
+        return updated_count, "성공"
+    except Exception as e:
+        logger.error(f"디자인 토큰 스캔 중 오류: {e}", exc_info=True)
+        return 0, str(e)

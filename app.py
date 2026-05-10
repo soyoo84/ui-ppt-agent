@@ -50,7 +50,7 @@ def on_file_upload():
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
 st.title(f"🎨 {APP_TITLE}")
-st.markdown(f"AS-IS 화면 캡쳐본을 업로드하면, 내부망 HCP API({HCP_TEXT_MODEL})가 분석하여 **수정 가능한 PPT**로 자동 변환합니다.")
+st.markdown(f"AS-IS 화면 캡쳐본을 업로드하면, 내부망 HCP API({HCP_TEXT_MODEL})가 분석하여 디자이너와 퍼블리셔를 위한 **수정 가능한 UI 정의서(PPT)**로 자동 변환합니다.")
 
 # 화면을 좌우 반으로 나눔
 col1, col2 = st.columns(2)
@@ -149,6 +149,21 @@ with col1:
                     selected_layout_name = TARGET_LAYOUT_NAME
             else:
                 st.info(f"'{MASTER_TEMPLATE_DIR}' 폴더에 PPT 템플릿이 없습니다. 기본 슬라이드로 생성됩니다.")
+                
+            st.markdown("---")
+            with st.expander("🛠️ 관리자 도구 (디자인 토큰 자동 추출)"):
+                st.markdown("현재 선택된 **PPT 템플릿** 내부의 도형들을 스캔하여 `components_registry.json`에 자동으로 등록합니다.\n*(※ 인식 방법: 1. 도형의 객체 이름을 영문(예: HdsButton)으로 변경하거나, 2. 도형 안에 HdsButton 이라고 적어두면 스캔됩니다.)*")
+                if st.button("🪄 템플릿에서 디자인 토큰 스캔", use_container_width=True):
+                    if selected_template_path:
+                        from ppt_service import sync_design_tokens_from_ppt
+                        with st.spinner("PPT 파일을 스캔하여 속성을 추출하는 중..."):
+                            count, msg = sync_design_tokens_from_ppt(selected_template_path)
+                            if count > 0:
+                                st.success(f"🎉 성공! {count}개의 컴포넌트 스타일이 성공적으로 추출되어 JSON에 저장되었습니다.")
+                            else:
+                                st.warning(f"추출된 토큰이 없습니다. 스캔할 도형의 객체 이름을 변경하거나 텍스트를 적어두었는지 확인해 주세요. (사유: {msg})")
+                    else:
+                        st.error("먼저 위의 '적용할 PPT 템플릿'을 선택해 주세요.")
 
 # 공통 PPT 생성 함수 (버튼 및 채팅창에서 호출)
 def generate_and_render_ppt(img_bytes, prompt_text, prev_json, feedback_msg, template_path=None, layout_name=None) -> bool:
@@ -173,7 +188,7 @@ def generate_and_render_ppt(img_bytes, prompt_text, prev_json, feedback_msg, tem
             safe_screen_desc = html.escape(analysis_result.screen_description)
             screen_desc_br = safe_screen_desc.replace('\n', '<br>')
             
-            desc_html = f"<h3 style='margin-top:0;'>📌 화면 설명 및 정책</h3>"
+            desc_html = f"<h3 style='margin-top:0;'>📌 UI 화면 설명 및 퍼블리싱 정책</h3>"
             desc_html += f"<p>{screen_desc_br}</p>"
             desc_html += "<h4>[컴포넌트별 세부 기능]</h4><ul style='padding-left:20px;'>"
             for comp in analysis_result.components:
@@ -231,7 +246,7 @@ def generate_and_render_ppt(img_bytes, prompt_text, prev_json, feedback_msg, tem
             return False
 
 with col2:
-    st.subheader("2. TO-BE PPT 결과 확인")
+    st.subheader("2. TO-BE UI 정의서 결과 확인")
     if image_bytes is not None:
         # 최초 생성이 안 된 경우에만 큰 버튼 표시
         if not st.session_state.get("generated_data"):
@@ -245,30 +260,39 @@ with col2:
             try:
                 css_content = load_css_content("hds.css")
                 
-                html_for_preview = re.sub(
-                    r'<link\s+rel=["\']stylesheet["\']\s+href=["\']\./hds\.css["\']\s*/?>',
-                    lambda m: f"<style>\n{css_content}\n</style>",
-                    data["html_str"],
-                    flags=re.IGNORECASE
-                )
+                # React 코드일 경우 브라우저 직접 렌더링이 불가능하므로 안내 메시지로 대체 (깨짐 방지)
+                if "React" in custom_prompt:
+                    html_for_preview = """<div style="display:flex; justify-content:center; align-items:center; height:400px; background:#f8f9fa; border-radius:8px; color:#555; text-align:center; font-family:sans-serif;">
+                        <h3>⚛️ React(JSX) 코드는 브라우저에서 직접 렌더링할 수 없습니다.<br><br>상단의 <b>💻 React 코드</b> 탭과 다운로드 파일을 확인해 주세요.</h3>
+                    </div>"""
+                else:
+                    html_for_preview = re.sub(
+                        r'<link\s+rel=["\']stylesheet["\']\s+href=["\']\./hds\.css["\']\s*/?>',
+                        lambda m: f"<style>\n{css_content}\n</style>",
+                        data["html_str"],
+                        flags=re.IGNORECASE
+                    )
                 
                 code_title = "💻 React 코드" if "React" in custom_prompt else "💻 HTML 코드"
                 code_lang = "jsx" if "React" in custom_prompt else "html"
                 
-                tab_preview, tab_code, tab_json, tab_css = st.tabs(["👀 화면 미리보기", code_title, "📝 JSON 데이터", "🎨 HDS CSS"])
+                # CSS 존재 여부에 따라 탭을 동적으로 생성 (빈 탭 방지)
+                tab_names = ["👀 화면 미리보기", code_title, "📝 JSON 데이터"]
+                if css_content: tab_names.append("🎨 HDS CSS")
+                tabs = st.tabs(tab_names)
                 
-                with tab_preview:
+                with tabs[0]:
                     st.components.v1.html(html_for_preview, height=450, scrolling=True)
-                with tab_code:
+                with tabs[1]:
                     st.code(data["html_str"], language=code_lang)
-                with tab_json:
+                with tabs[2]:
                     st.code(data["json_str"], language="json")
-                with tab_css:
-                    st.code(css_content, language="css")
+                if css_content:
+                    with tabs[3]:
+                        st.code(css_content, language="css")
                 
                 st.markdown("---")
                 st.subheader("📥 개별 파일 다운로드")
-                col_dl1, col_dl2, col_dl3, col_dl4, col_dl5 = st.columns(5)
                 
                 base_name = os.path.splitext(image_name)[0] if image_name else "generated_ui"
                 
@@ -283,12 +307,21 @@ with col2:
                     ])
                 csv_bytes = csv_buffer.getvalue().encode('utf-8-sig')
 
-                col_dl1.download_button(label="📊 PPT 다운로드", data=data["ppt"], file_name=f"UI_정의서_{base_name}.pptx", mime="application/vnd.openxmlformats-officedocument.presentationml.presentation", use_container_width=True)
-                col_dl2.download_button(label="🌐 HTML 다운로드", data=data["html_str"], file_name=f"index_{base_name}.html", mime="text/html", use_container_width=True)
+                # CSS 존재 여부에 따라 다운로드 버튼을 동적으로 꽉 차게 배치 (중간 빈 공백 제거)
+                dl_buttons = [
+                    ("📊 PPT 다운로드", data["ppt"], f"UI_정의서_{base_name}.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+                    ("🌐 HTML 다운로드", data["html_str"], f"index_{base_name}.html", "text/html")
+                ]
                 if css_content:
-                    col_dl3.download_button(label="🎨 CSS 다운로드", data=css_content, file_name="hds.css", mime="text/css", use_container_width=True)
-                col_dl4.download_button(label="📝 JSON 다운로드", data=data["json_str"], file_name=f"result_{base_name}.json", mime="application/json", use_container_width=True)
-                col_dl5.download_button(label="📈 CSV 다운로드", data=csv_bytes, file_name=f"components_{base_name}.csv", mime="text/csv", use_container_width=True)
+                    dl_buttons.append(("🎨 CSS 다운로드", css_content, "hds.css", "text/css"))
+                dl_buttons.extend([
+                    ("📝 JSON 다운로드", data["json_str"], f"result_{base_name}.json", "application/json"),
+                    ("📈 CSV 다운로드", csv_bytes, f"components_{base_name}.csv", "text/csv")
+                ])
+                
+                cols = st.columns(len(dl_buttons))
+                for col, (lbl, bdata, fname, mime) in zip(cols, dl_buttons):
+                    col.download_button(label=lbl, data=bdata, file_name=fname, mime=mime, use_container_width=True)
             except Exception as e:
                 st.warning(f"결과 파일을 처리하는 중 오류가 발생했습니다: {e}")
     else:

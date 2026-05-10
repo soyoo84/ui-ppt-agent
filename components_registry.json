@@ -1,0 +1,22 @@
+{
+    "HdsButton": {
+        "guide": "<HdsButton variant='primary|secondary' size='small|medium|large'> 버튼입니다. onClick 이벤트를 필수로 넣으세요.",
+        "ppt_style": {"shape": "ROUNDED_RECTANGLE", "bg": [255, 235, 235], "line": [230, 0, 18], "text": [230, 0, 18], "size": 10, "bold": true}
+    },
+    "HdsInput": {
+        "guide": "<HdsInput placeholder='' maxLength={50}> 텍스트 입력창입니다.",
+        "ppt_style": {"shape": "RECTANGLE", "bg": [255, 255, 255], "line": [180, 180, 180], "text": [150, 150, 150], "size": 12, "bold": false}
+    },
+    "HdsDataGrid": {
+        "guide": "<HdsDataGrid rowData={data} columnDefs={cols} pagination={true}> 복잡한 표 컴포넌트입니다.",
+        "ppt_style": {"shape": "RECTANGLE", "bg": [245, 245, 255], "line": [150, 150, 200], "text": [100, 100, 150], "size": 12, "bold": false}
+    },
+    "HdsModal": {
+        "guide": "<HdsModal isOpen={isOpen} onClose={closeHandler} title=''> 팝업 모달입니다.",
+        "ppt_style": {"shape": "RECTANGLE", "bg": [255, 255, 255], "line": [120, 120, 120], "text": [30, 30, 30], "size": 14, "bold": true}
+    },
+    "Default": {
+        "guide": "",
+        "ppt_style": {"shape": "RECTANGLE", "bg": [245, 245, 255], "line": [150, 150, 200], "text": [100, 100, 150], "size": 12, "bold": false}
+    }
+}

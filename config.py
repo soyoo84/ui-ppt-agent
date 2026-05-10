@@ -51,6 +51,9 @@ try:
     parsed_color = tuple(map(int, _primary_color_str.replace(" ", "").split(",")))
     if len(parsed_color) != 3:
         raise ValueError("RGB 값은 반드시 3개의 숫자여야 합니다.")
+        if any(c < 0 or c > 255 for c in parsed_color):
+            raise ValueError("RGB 값은 0~255 사이여야 합니다.")
     HDS_PRIMARY_COLOR = parsed_color
-except Exception:
+except Exception as e:
+    print(f"⚠️ [Warning] HDS_PRIMARY_COLOR_RGB 설정 오류 ({e}) - 기본값(230,0,18)으로 롤백됩니다.")
     HDS_PRIMARY_COLOR = (230, 0, 18) # 파싱 실패 시 기본 컬러(Red)로 안전하게 롤백

@@ -5,11 +5,12 @@ import time
 import logging
 import html
 import io
+import os
 from PIL import Image, ImageOps
 from pydantic import ValidationError
 from schemas import ScreenAnalysisResult
 from openai import Client, APITimeoutError, APIConnectionError, APIStatusError
-from prompts import DEFAULT_PROMPT, USER_PROMPT_BASE, USER_PROMPT_REVISION, get_storybook_docs
+from prompts import DEFAULT_PROMPT, USER_PROMPT_BASE, USER_PROMPT_REVISION, get_component_registry
 from config import (
     HCP_API_KEY, HCP_VISION_MODEL, HCP_TEXT_MODEL,
     LLM_MAX_RETRIES, LLM_TIMEOUT_SECONDS, LLM_MAX_TOKENS, LLM_TEMPERATURE
@@ -84,7 +85,27 @@ class HCPQwenService:
         """
         HCP API(Qwen 3.5)를 사용하여 이미지를 분석하고 컴포넌트를 추출합니다.
         """
+        # [우선순위 역전] hds.css를 최우선 진실의 원천(Source of Truth)으로 LLM에게 제공
+        css_content = ""
+        if os.path.exists("hds.css"):
+            try:
+                with open("hds.css", "r", encoding="utf-8") as f:
+                    raw_css = f.read()
+                    if len(raw_css) > 2500:
+                        # [토큰 다이어트] 파일이 너무 크면 내부 스타일 속성({ ... })은 버리고 클래스명만 추출
+                        class_names = set(re.findall(r'\.([a-zA-Z0-9_-]+)', raw_css))
+                        css_content = "/* CSS 용량 초과 방지: 사내 가이드 클래스명 목록만 요약 추출함 */\n" + ", ".join([f".{c}" for c in sorted(class_names)])
+                        if len(css_content) > 2500:
+                            css_content = css_content[:2500] + "..."
+                    else:
+                        css_content = raw_css
+            except Exception as e:
+                logger.warning(f"hds.css 읽기 실패: {e}")
+
         system_prompt = custom_system_prompt.strip() if custom_system_prompt and custom_system_prompt.strip() else DEFAULT_PROMPT
+        
+        # [성능 최적화] 컴포넌트 레지스트리를 한 번만 로드하여 모든 로직에서 재사용
+        registry = get_component_registry()
         
         user_prompt = USER_PROMPT_BASE
         if previous_json and feedback:
@@ -93,16 +114,18 @@ class HCPQwenService:
             # [초고속 최적화] 피드백(채팅) 모드에서도 동적 프롬프트 주입 적용
             try:
                 prev_data = json.loads(previous_json)
-                storybook_docs = get_storybook_docs()
                 found_types = set([c.get("component_type", "") for c in prev_data.get("components", []) if isinstance(c, dict)])
                 injected_guidelines = ""
                 for comp_type in found_types:
-                    if comp_type in storybook_docs:
-                        injected_guidelines += f"- [{comp_type}]: {storybook_docs[comp_type]}\n"
+                    if comp_type in registry and registry[comp_type].get("guide"):
+                        injected_guidelines += f"- [{comp_type}]: {registry[comp_type]['guide']}\n"
                 if injected_guidelines:
                     user_prompt += f"\n\n[🚨 사내 Storybook 컴포넌트 가이드 🚨]\n코드를 수정할 때 아래 명세를 반드시 엄수하세요:\n{injected_guidelines}"
             except Exception as e:
                 logger.warning(f"피드백 모드 동적 주입 실패: {e}")
+                
+            if css_content:
+                user_prompt += f"\n\n[🚨 1순위: 사내 HDS CSS 스타일시트 🚨]\nHTML/JSX 코드 작성 시 아래 CSS에 정의된 클래스명(.ant-btn 등)을 최우선으로 사용하여 화면을 구성하세요:\n```css\n{css_content}\n```"
 
         # 2. OpenAI 호환 API 호출 (타임아웃 및 재시도 로직 추가)
         # --- [LLM 하이퍼파라미터 설정] ---
@@ -164,7 +187,7 @@ class HCPQwenService:
             ]
             fast_output = _call_api_with_retry(self.text_model, fast_messages, "Feedback Fast-Track")
             
-            print(f"\n[DEBUG] Feedback Fast-Track 응답 길이: {len(fast_output)}자")
+            logger.info(f"Feedback Fast-Track 응답 길이: {len(fast_output)}자")
             parsed_dict = self._extract_json_from_text(fast_output)
             
             if "generated_html" in parsed_dict and isinstance(parsed_dict["generated_html"], str):
@@ -222,20 +245,24 @@ class HCPQwenService:
             logger.info("=== 2-Pass Pipeline: [Pass 2] Text API 시작 ===")
             
             # [2-Pass 최적화] 1단계에서 찾은 컴포넌트의 가이드만 동적으로 주입
-            storybook_docs = get_storybook_docs()
             found_types = set([c.get("component_type", "") for c in components_data if isinstance(c, dict)])
             injected_guidelines = ""
             for comp_type in found_types:
-                if comp_type in storybook_docs:
-                    injected_guidelines += f"- [{comp_type}]: {storybook_docs[comp_type]}\n"
+                if comp_type in registry and registry[comp_type].get("guide"):
+                    injected_guidelines += f"- [{comp_type}]: {registry[comp_type]['guide']}\n"
                     
             text_user_prompt = f"다음은 화면 이미지에서 추출된 UI 컴포넌트들의 JSON 데이터입니다:\n```json\n{json.dumps(components_data, ensure_ascii=False, indent=2)}\n```\n"
+            if css_content:
+                text_user_prompt += f"\n[🚨 1순위: 사내 HDS CSS 스타일시트 🚨]\nHTML/JSX 코드 작성 시 아래 CSS에 정의된 클래스명(.ant-btn 등)을 최우선으로 사용하여 화면을 구성하세요:\n```css\n{css_content}\n```\n"
             if injected_guidelines:
                 text_user_prompt += f"\n[🚨 사내 Storybook 컴포넌트 가이드 🚨]\n위 JSON 데이터를 기반으로 코드를 작성하되, 아래의 명세를 반드시 엄수하세요:\n{injected_guidelines}\n"
             text_user_prompt += "\n위 데이터를 바탕으로, 원래의 시스템 프롬프트 지시사항에 맞추어 'generated_html'에 들어갈 코드를 작성하세요.\n다른 설명이나 마크다운 없이, 오직 HTML 또는 React(JSX) 코드 원본 자체만 텍스트로 반환하세요. (코드 블록 ```html 사용 무방)"
             
+            # [2-Pass 최적화] 2단계에서는 시스템 프롬프트의 JSON 제약을 해제하여 충돌을 방지합니다.
+            pass2_system_prompt = system_prompt + "\n\n[🚨 2-Pass 아키텍처 2단계: 응답 형식 변경]\n이전 지시사항의 'JSON 응답' 제약을 무시하세요. 이번 단계에서는 JSON이 아닌, 순수한 프론트엔드 코드(HTML/JSX) 원본 텍스트만을 출력해야 합니다."
+            
             text_messages = [
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": pass2_system_prompt},
                 {"role": "user", "content": text_user_prompt}
             ]
             
@@ -244,12 +271,22 @@ class HCPQwenService:
             # 3. 데이터 병합
             # --- [디버깅 로그: JSON 잘림 현상 확인용] ---
             token_limit_msg = max_tokens if max_tokens else "무제한 (AI 모델 물리적 최대치)"
-            print(f"\n[DEBUG] 설정된 최대 허용 토큰 수(Max Tokens): {token_limit_msg}")
-            print(f"\n[DEBUG] Pass 1 (Vision) 응답 길이: {len(vision_output)}자")
-            print(f"\n[DEBUG] Pass 2 (Text) 응답 길이: {len(text_output)}자")
+            logger.info(f"설정된 최대 허용 토큰 수(Max Tokens): {token_limit_msg}")
+            logger.info(f"Pass 1 (Vision) 응답 길이: {len(vision_output)}자")
+            logger.info(f"Pass 2 (Text) 응답 길이: {len(text_output)}자")
+            
+            # Pass 2 응답이 프롬프트 지시를 무시하고 JSON 포맷으로 돌아왔을 경우를 대비한 방어 로직
+            pass2_raw_html = text_output.strip()
+            if pass2_raw_html.startswith("{") and "generated_html" in pass2_raw_html:
+                try:
+                    fallback_json = self._extract_json_from_text(pass2_raw_html)
+                    if "generated_html" in fallback_json:
+                        pass2_raw_html = fallback_json["generated_html"]
+                except Exception:
+                    pass
             
             # Pass 2의 코드 결과물을 파싱된 딕셔너리에 병합
-            cleaned_html = html.unescape(text_output.strip())
+            cleaned_html = html.unescape(pass2_raw_html)
             cleaned_html = re.sub(r'^\s*```[a-zA-Z]*\n?', '', cleaned_html)
             cleaned_html = re.sub(r'\n?```\s*$', '', cleaned_html)
             parsed_dict["generated_html"] = cleaned_html
