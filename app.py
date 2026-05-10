@@ -1,14 +1,28 @@
 import streamlit as st
-from PIL import Image, ImageGrab
+from PIL import Image, ImageGrab, ImageOps
 import io
 import os
 import re
 import time
 import csv
+import html
+import logging
 from prompts import PROMPT_TEMPLATES
-from config import APP_TITLE, HCP_API_URL, HCP_TEXT_MODEL
+from config import APP_TITLE, HCP_API_URL, HCP_TEXT_MODEL, MASTER_TEMPLATE_DIR, TARGET_LAYOUT_NAME
 from local_llm_service import HCPQwenService
-from ppt_service import create_editable_ppt
+from ppt_service import create_editable_ppt, get_layout_names
+
+# --- [엔터프라이즈 로깅 시스템 설정] ---
+os.makedirs("logs", exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("logs/system.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 def load_css_content(file_path="hds.css"):
     if os.path.exists(file_path):
@@ -51,7 +65,7 @@ with col1:
         on_change=on_file_upload
     )
     
-    if st.button("📋 클립보드에서 직접 가져오기", width="stretch"):
+    if st.button("📋 클립보드에서 직접 가져오기", use_container_width=True):
         try:
             img = ImageGrab.grabclipboard()
             if img is not None:
@@ -63,7 +77,7 @@ with col1:
                         # 투명 배경(PNG) 복사 시 배경이 검게 변하는 현상을 방지하기 위해 흰색 배경을 덧댐
                         rgba_img = img.convert("RGBA")
                         background = Image.new("RGB", rgba_img.size, (255, 255, 255))
-                        background.paste(rgba_img, mask=rgba_img.split()[3])
+                        background.paste(rgba_img, mask=rgba_img.getchannel('A'))
                         img = background
                     img_byte_arr = io.BytesIO()
                     img.save(img_byte_arr, format='PNG')
@@ -80,6 +94,8 @@ with col1:
     image_bytes = None
     file_id = None
     image_name = ""
+    selected_template_path = None
+    selected_layout_name = None
     
     if st.session_state["clipboard_image_bytes"] is not None:
         image_bytes = st.session_state["clipboard_image_bytes"]
@@ -99,6 +115,8 @@ with col1:
             
         # 업로드된 이미지 미리보기
         image = Image.open(io.BytesIO(image_bytes))
+        # 스마트폰 캡쳐본의 회전 방향을 올바르게 보정하여 미리보기
+        image = ImageOps.exif_transpose(image)
         st.image(image, caption=f"업로드된 AS-IS 화면 ({image_name})", use_container_width=True)
         
         with st.expander("⚙️ 고급 설정 (시스템 프롬프트 편집)"):
@@ -106,10 +124,39 @@ with col1:
             selected_template = st.selectbox("프롬프트 템플릿 선택", list(PROMPT_TEMPLATES.keys()))
             custom_prompt = st.text_area("시스템 프롬프트 내용", value=PROMPT_TEMPLATES[selected_template], height=400)
 
+            st.markdown("---")
+            st.markdown("### 🎨 PPT 템플릿 설정")
+            template_files = []
+            # 임시 파일(~$...) 제외하고 pptx 파일만 목록화
+            if os.path.exists(MASTER_TEMPLATE_DIR):
+                template_files = [f for f in os.listdir(MASTER_TEMPLATE_DIR) if f.endswith(".pptx") and not f.startswith("~")]
+            
+            if template_files:
+                selected_ppt_name = st.selectbox("적용할 PPT 템플릿", template_files)
+                selected_template_path = os.path.join(MASTER_TEMPLATE_DIR, selected_ppt_name)
+                
+                layout_names = get_layout_names(selected_template_path)
+                if layout_names:
+                    default_idx = 0
+                    for i, name in enumerate(layout_names):
+                        if TARGET_LAYOUT_NAME and TARGET_LAYOUT_NAME == name:
+                            default_idx = i
+                            break
+                        elif not TARGET_LAYOUT_NAME and ("빈" in name or "blank" in name.lower()):
+                            default_idx = i
+                    selected_layout_name = st.selectbox("슬라이드 레이아웃 선택", layout_names, index=default_idx)
+                else:
+                    selected_layout_name = TARGET_LAYOUT_NAME
+            else:
+                st.info(f"'{MASTER_TEMPLATE_DIR}' 폴더에 PPT 템플릿이 없습니다. 기본 슬라이드로 생성됩니다.")
+
 # 공통 PPT 생성 함수 (버튼 및 채팅창에서 호출)
-def generate_and_render_ppt(img_bytes, prompt_text, prev_json, feedback_msg) -> bool:
+def generate_and_render_ppt(img_bytes, prompt_text, prev_json, feedback_msg, template_path=None, layout_name=None) -> bool:
     spinner_msg = "피드백을 반영하여 PPT를 다시 그리는 중입니다..." if prev_json else f"HCP API({HCP_TEXT_MODEL})가 이미지를 분석하고 PPT를 그리는 중입니다..."
     with st.spinner(spinner_msg):
+        start_time = time.time()
+        logger.info(f"=== PPT 생성 요청 시작 (레이아웃: {layout_name}) ===")
+        
         try:
             llm_service = HCPQwenService(base_url=HCP_API_URL)
             analysis_result = llm_service.analyze_asis_image_local(
@@ -120,8 +167,23 @@ def generate_and_render_ppt(img_bytes, prompt_text, prev_json, feedback_msg) -> 
             )
             
             ppt_stream = io.BytesIO()
-            create_editable_ppt(analysis_result, ppt_stream)
+            create_editable_ppt(analysis_result, ppt_stream, template_path, layout_name)
             
+            # HTML 삽입 시 <, > 등의 기호가 태그로 인식되어 화면이 깨지는 현상 방지
+            safe_screen_desc = html.escape(analysis_result.screen_description)
+            screen_desc_br = safe_screen_desc.replace('\n', '<br>')
+            
+            desc_html = f"<h3 style='margin-top:0;'>📌 화면 설명 및 정책</h3>"
+            desc_html += f"<p>{screen_desc_br}</p>"
+            desc_html += "<h4>[컴포넌트별 세부 기능]</h4><ul style='padding-left:20px;'>"
+            for comp in analysis_result.components:
+                if comp.event_description:
+                    safe_id = f"[{html.escape(comp.component_id)}] " if getattr(comp, 'component_id', None) else ""
+                    safe_title = html.escape(comp.text or comp.component_type)
+                    safe_event = html.escape(comp.event_description)
+                    desc_html += f"<li style='margin-bottom:8px;'><b>{safe_id}{safe_title}</b>: {safe_event}</li>"
+            desc_html += "</ul>"
+
             html_content = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -130,9 +192,24 @@ def generate_and_render_ppt(img_bytes, prompt_text, prev_json, feedback_msg) -> 
     <!-- Ant Design 기본 스타일 CDN (미리보기 렌더링용) -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/antd/4.24.14/antd.min.css">
     <link rel="stylesheet" href="./hds.css">
+    <style>
+        body {{ background-color: #f0f2f5; padding: 20px; font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; }}
+        .preview-container {{ display: flex; gap: 20px; align-items: flex-start; }}
+        .ui-area {{ flex: 7; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); min-height: 400px; overflow-x: auto; }}
+        .desc-area {{ flex: 3; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); color: #333; }}
+        .desc-area h3, .desc-area h4 {{ color: #1f1f1f; }}
+        .desc-area p, .desc-area li {{ color: #555; font-size: 14px; line-height: 1.5; }}
+    </style>
 </head>
-<body style="padding: 20px;">
-    {analysis_result.generated_html}
+<body>
+    <div class="preview-container">
+        <div class="ui-area">
+            {analysis_result.generated_html}
+        </div>
+        <div class="desc-area">
+            {desc_html}
+        </div>
+    </div>
 </body>
 </html>"""
             json_content = analysis_result.model_dump_json(indent=2)
@@ -144,9 +221,12 @@ def generate_and_render_ppt(img_bytes, prompt_text, prev_json, feedback_msg) -> 
                 "components": analysis_result.components
             }
             st.session_state["last_json"] = json_content
+            elapsed = round(time.time() - start_time, 1)
+            logger.info(f"=== PPT 생성 성공 (소요시간: {elapsed}초) ===")
             st.toast("🎉 PPT 생성이 완료되었습니다!", icon="✅")
             return True
         except Exception as e:
+            logger.error(f"PPT 생성 중 오류 발생: {e}", exc_info=True)
             st.error(f"처리 중 오류가 발생했습니다: {e}")
             return False
 
@@ -155,9 +235,9 @@ with col2:
     if image_bytes is not None:
         # 최초 생성이 안 된 경우에만 큰 버튼 표시
         if not st.session_state.get("generated_data"):
-            if st.button("🚀 PPT 생성 시작", width="stretch"):
+            if st.button("🚀 PPT 생성 시작", use_container_width=True):
                 st.session_state["generated_data"] = None
-                generate_and_render_ppt(image_bytes, custom_prompt, None, None)
+                generate_and_render_ppt(image_bytes, custom_prompt, None, None, selected_template_path, selected_layout_name)
                 
         # 결과 렌더링
         if st.session_state.get("generated_data"):
@@ -172,14 +252,21 @@ with col2:
                     flags=re.IGNORECASE
                 )
                 
-                st.subheader("👀 HDS UI 화면 미리보기")
-                st.components.v1.html(html_for_preview, height=450, scrolling=True)
+                code_title = "💻 React 코드" if "React" in custom_prompt else "💻 HTML 코드"
+                code_lang = "jsx" if "React" in custom_prompt else "html"
                 
-                code_title = "💻 생성된 React(JSX) 코드" if "React" in custom_prompt else "💻 생성된 HTML 코드"
-                code_lang = "javascript" if "React" in custom_prompt else "html"
-                st.subheader(code_title)
-                st.code(data["html_str"], language=code_lang)
+                tab_preview, tab_code, tab_json, tab_css = st.tabs(["👀 화면 미리보기", code_title, "📝 JSON 데이터", "🎨 HDS CSS"])
                 
+                with tab_preview:
+                    st.components.v1.html(html_for_preview, height=450, scrolling=True)
+                with tab_code:
+                    st.code(data["html_str"], language=code_lang)
+                with tab_json:
+                    st.code(data["json_str"], language="json")
+                with tab_css:
+                    st.code(css_content, language="css")
+                
+                st.markdown("---")
                 st.subheader("📥 개별 파일 다운로드")
                 col_dl1, col_dl2, col_dl3, col_dl4, col_dl5 = st.columns(5)
                 
@@ -196,19 +283,23 @@ with col2:
                     ])
                 csv_bytes = csv_buffer.getvalue().encode('utf-8-sig')
 
-                col_dl1.download_button(label="📊 PPT 다운로드", data=data["ppt"], file_name=f"UI_정의서_{base_name}.pptx", mime="application/vnd.openxmlformats-officedocument.presentationml.presentation", width="stretch")
-                col_dl2.download_button(label="🌐 HTML 다운로드", data=data["html_str"], file_name=f"index_{base_name}.html", mime="text/html", width="stretch")
+                col_dl1.download_button(label="📊 PPT 다운로드", data=data["ppt"], file_name=f"UI_정의서_{base_name}.pptx", mime="application/vnd.openxmlformats-officedocument.presentationml.presentation", use_container_width=True)
+                col_dl2.download_button(label="🌐 HTML 다운로드", data=data["html_str"], file_name=f"index_{base_name}.html", mime="text/html", use_container_width=True)
                 if css_content:
-                    col_dl3.download_button(label="🎨 CSS 다운로드", data=css_content, file_name="hds.css", mime="text/css", width="stretch")
-                col_dl4.download_button(label="📝 JSON 다운로드", data=data["json_str"], file_name=f"result_{base_name}.json", mime="application/json", width="stretch")
-                col_dl5.download_button(label="📈 CSV 다운로드", data=csv_bytes, file_name=f"components_{base_name}.csv", mime="text/csv", width="stretch")
+                    col_dl3.download_button(label="🎨 CSS 다운로드", data=css_content, file_name="hds.css", mime="text/css", use_container_width=True)
+                col_dl4.download_button(label="📝 JSON 다운로드", data=data["json_str"], file_name=f"result_{base_name}.json", mime="application/json", use_container_width=True)
+                col_dl5.download_button(label="📈 CSV 다운로드", data=csv_bytes, file_name=f"components_{base_name}.csv", mime="text/csv", use_container_width=True)
             except Exception as e:
                 st.warning(f"결과 파일을 처리하는 중 오류가 발생했습니다: {e}")
     else:
         st.info("먼저 좌측에 이미지를 업로드해주세요.")
 
-# 3. 하단 고정 채팅창 (피드백 반영용 Chat UI)
-feedback = st.chat_input("🔄 PPT를 어떻게 그릴지 채팅으로 명령해 보세요! (예: 로그인 버튼을 파란색으로 변경해줘)")
+# 3. 사이드바 채팅창 (피드백 반영용 Chat UI)
+with st.sidebar:
+    st.header("💬 AI 피드백 채팅")
+    st.info("결과물에 수정이 필요하신가요?\n아래 채팅창에 원하는 변경사항을 입력하시면 즉시 반영됩니다.")
+    feedback = st.chat_input("예: 로그인 버튼을 파란색으로 변경해줘")
+
 if feedback:
     if image_bytes is None:
         st.error("앗! 먼저 좌측에 화면 이미지를 업로드(또는 Ctrl+V)해 주세요.")
@@ -219,10 +310,10 @@ if feedback:
         if not prev_json:
             # 1차 생성 전에 처음부터 바로 채팅을 친 경우: 시스템 프롬프트에 요구사항 추가
             prompt_to_use += f"\n\n[특별 요청사항]\n{feedback}"
-            success = generate_and_render_ppt(image_bytes, prompt_to_use, None, None)
+            success = generate_and_render_ppt(image_bytes, prompt_to_use, None, None, selected_template_path, selected_layout_name)
         else:
             # 이미 1차 결과가 있는 경우: 피드백 루프로 반영
-            success = generate_and_render_ppt(image_bytes, prompt_to_use, prev_json, feedback)
+            success = generate_and_render_ppt(image_bytes, prompt_to_use, prev_json, feedback, selected_template_path, selected_layout_name)
             
         if success:
             st.rerun()

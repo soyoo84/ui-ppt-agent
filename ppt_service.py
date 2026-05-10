@@ -7,18 +7,30 @@ from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
 from schemas import ScreenAnalysisResult
 from config import (
-    MASTER_PPT_PATH, TARGET_LAYOUT_NAME, PPT_SLIDE_WIDTH, PPT_SLIDE_HEIGHT,
-    PPT_UI_SCALE, PPT_ALIGN_THRESHOLD, PPT_CONTAINER_PADDING, HDS_PRIMARY_COLOR
+    MASTER_PPT_PATH, TARGET_LAYOUT_NAME, PPT_SLIDE_WIDTH, PPT_SLIDE_HEIGHT, PPT_UI_SCALE,
+    PPT_TOP_OFFSET_RATIO, PPT_ALIGN_THRESHOLD, PPT_CONTAINER_PADDING, HDS_PRIMARY_COLOR
 )
 
-def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
+def get_layout_names(template_path):
+    """PPT 템플릿 파일에서 슬라이드 레이아웃 이름 목록을 추출합니다."""
+    if not template_path or not os.path.exists(template_path):
+        return []
+    try:
+        prs = Presentation(template_path)
+        return [layout.name for layout in prs.slide_layouts]
+    except Exception:
+        return []
+
+def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, template_path=None, layout_name=None):
     """
     분석된 JSON 데이터를 바탕으로 수정 가능한 PPT 파일을 생성합니다.
     """
     # 사내 템플릿 로드 (파일이 존재하지 않으면 기본 빈 프레젠테이션 생성)
-    template_path = MASTER_PPT_PATH
     if template_path and os.path.exists(template_path):
         prs = Presentation(template_path)
+    # 사용자가 아직 master 폴더로 이관하지 않고 기존 환경변수를 사용하는 경우에 대한 안전한 롤백(호환성)
+    elif MASTER_PPT_PATH and os.path.exists(MASTER_PPT_PATH):
+        prs = Presentation(MASTER_PPT_PATH)
     else:
         prs = Presentation()
         # 16:9 와이드스크린 비율 설정
@@ -27,7 +39,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
     
     # --- [레이아웃 이름으로 템플릿 찾기] ---
     # 사용하는 템플릿의 슬라이드 마스터에 있는 실제 레이아웃 이름을 입력하세요.
-    target_layout_name = TARGET_LAYOUT_NAME 
+    target_layout_name = layout_name or TARGET_LAYOUT_NAME 
     slide_layout = None
     
     if target_layout_name:
@@ -50,14 +62,18 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
     actual_slide_width = prs.slide_width
     actual_slide_height = prs.slide_height
     
-    # 우측에 설명 박스를 넣기 위해 UI 렌더링 영역을 65%로 축소
+    # 템플릿 상단의 'UI 정의서 표/내용' 영역을 덮어쓰지 않도록 UI 렌더링 영역을 하단으로 내립니다.
     ui_scale = PPT_UI_SCALE
+    # 상단 여백 확보를 위해 UI 스케일이 너무 크면 자동으로 약간 축소 (기본 65%)
+    if ui_scale > 0.65:
+        ui_scale = 0.65
+        
     slide_width = actual_slide_width * ui_scale
     slide_height = actual_slide_height * ui_scale
     
-    # UI 영역 위치 오프셋 (좌측 여백 5%, 세로 중앙 정렬)
+    # UI 영역 위치 오프셋 (좌측 여백 5%, 설정된 상단 여백 비율을 적용하여 하단 좌측으로 배치)
     offset_left = int(actual_slide_width * 0.05)
-    offset_top = int((actual_slide_height - slide_height) / 2)
+    offset_top = int(actual_slide_height * PPT_TOP_OFFSET_RATIO)
     
     # --- [정렬 보정 알고리즘 추가 시작] ---
     # 설정된 오차 범위 이내인 요소들을 같은 그룹(행)으로 묶습니다.
@@ -74,13 +90,11 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
                 current_group = [comp]
         groups.append(current_group)
         
-        # 같은 행에 있는 요소들의 Y 좌표와 높이를 그룹의 평균값으로 통일하여 수평 정렬을 맞춥니다.
+        # 같은 행에 있는 요소들의 Y 좌표를 그룹의 평균값으로 통일하여 수평 정렬을 맞춥니다. (높이는 원본 유지)
         for group in groups:
             avg_y = sum(c.y_percent for c in group) / len(group)
-            avg_h = sum(c.height_percent for c in group) / len(group)
             for c in group:
                 c.y_percent = avg_y
-                c.height_percent = avg_h
     # --- [정렬 보정 알고리즘 추가 끝] ---
     
     # --- [수직 정렬(Column Alignment) 보정 알고리즘 추가 시작] ---
@@ -128,7 +142,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
 
     # --- [Z-Index 보정 알고리즘 추가] ---
     # 모달, 툴팁, 드롭다운 등 화면에 떠 있는(Floating) 요소들이 다른 도형에 가려지지 않도록 가장 마지막(최상단)에 그립니다.
-    floating_types = {"Modal", "Tooltip", "Dropdown"}
+    floating_types = {"Modal", "HdsModal", "Dialog", "Tooltip", "HdsTooltip", "Popover", "Dropdown", "Select", "HdsSelect", "HdsDropdown"}
     regular_comps = [c for c in analysis_result.components if c.component_type not in floating_types]
     floating_comps = [c for c in analysis_result.components if c.component_type in floating_types]
     
@@ -150,7 +164,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
         width = max(int(Inches(0.5)), width)
         height = max(int(Inches(0.3)), height)
 
-        if comp.component_type == "PrimaryButton":
+        if comp.component_type in ("PrimaryButton", "Button", "HdsButton"):
             # 둥근 모서리 사각형 (MSO_SHAPE.ROUNDED_RECTANGLE = 5)
             shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height)
             shape.fill.solid()
@@ -164,7 +178,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             tf.paragraphs[0].font.bold = True
             tf.paragraphs[0].font.size = Pt(14)
             
-        elif comp.component_type == "Tooltip":
+        elif comp.component_type in ("Tooltip", "HdsTooltip", "Popover"):
             # Ant Design 스타일의 Tooltip (어두운 배경의 말풍선 형태)
             shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height)
             shape.fill.solid()
@@ -178,7 +192,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             tf.paragraphs[0].font.color.rgb = RGBColor(255, 255, 255)
             tf.paragraphs[0].font.size = Pt(10)
             
-        elif comp.component_type == "ProgressBar":
+        elif comp.component_type in ("ProgressBar", "Progress", "HdsProgress", "HdsProgressBar"):
             # Ant Design 스타일의 Progress Bar (배경 트랙 + 메인 컬러 채움)
             bg_shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height)
             bg_shape.fill.solid()
@@ -191,7 +205,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             fg_shape.fill.fore_color.rgb = RGBColor(*HDS_PRIMARY_COLOR)
             fg_shape.line.color.rgb = RGBColor(*HDS_PRIMARY_COLOR)
             
-        elif comp.component_type == "TextInput":
+        elif comp.component_type in ("TextInput", "Input", "HdsInput", "TextArea"):
             # 일반 사각형 테두리 (MSO_SHAPE.RECTANGLE = 1)
             shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
             shape.fill.solid()
@@ -201,10 +215,11 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             tf = shape.text_frame
             safe_text = comp.text if comp.text else ""
             tf.text = f" {safe_text}" # 좌측 여백을 위해 공백 추가
+            tf.word_wrap = True
             tf.paragraphs[0].alignment = PP_ALIGN.LEFT
             tf.paragraphs[0].font.color.rgb = RGBColor(150, 150, 150)
             
-        elif comp.component_type == "Dropdown":
+        elif comp.component_type in ("Dropdown", "Select", "HdsSelect", "HdsDropdown"):
             # Ant Design 스타일의 Select/Dropdown (우측에 ▼ 화살표 추가)
             shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
             shape.fill.solid()
@@ -214,33 +229,49 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             tf = shape.text_frame
             safe_text = comp.text if comp.text else "선택"
             tf.text = f" {safe_text}   ▼"
+            tf.word_wrap = True
             tf.paragraphs[0].alignment = PP_ALIGN.LEFT
             tf.paragraphs[0].font.color.rgb = RGBColor(80, 80, 80)
             tf.paragraphs[0].font.size = Pt(12)
             
-        elif comp.component_type == "AgGrid":
-            # AG Grid 스타일의 데이터 그리드
-            # 3행 3열의 기본 표를 생성하여 AG Grid를 시각적으로 표현
-            table_shape = slide.shapes.add_table(3, 3, left, top, width, height)
+        elif comp.component_type in ("AgGrid", "Table", "DataGrid", "DataTable", "Grid", "HdsDataGrid"):
+            # 데이터 그리드를 확실한 표(Table) 형태로 렌더링
+            # 3행 4열의 기본 표를 생성하여 시각적으로 풍부하게 표현
+            table_shape = slide.shapes.add_table(3, 4, left, top, width, height)
             table = table_shape.table
             
             # 헤더(첫 행) 및 데이터 행 스타일링
             for r_idx in range(3):
-                for c_idx in range(3):
+                for c_idx in range(4):
                     cell = table.cell(r_idx, c_idx)
                     if r_idx == 0:
-                        cell.text = f"AG Col {c_idx + 1}"
+                        cell.text = f"Column {c_idx + 1}"
                         cell.fill.solid()
-                        cell.fill.fore_color.rgb = RGBColor(248, 248, 248) # AG Grid 기본 헤더 배경색
+                        cell.fill.fore_color.rgb = RGBColor(240, 245, 250) # 세련된 연한 파란색 헤더
                         cell.text_frame.paragraphs[0].font.bold = True
                     else:
-                        cell.text = comp.text if c_idx == 0 and r_idx == 1 else "Data"
+                        cell.text = comp.text if c_idx == 0 and r_idx == 1 and comp.text else "Data"
                     
                     cell.text_frame.paragraphs[0].font.size = Pt(10)
                     cell.text_frame.paragraphs[0].font.color.rgb = RGBColor(80, 80, 80)
                     cell.vertical_anchor = MSO_ANCHOR.MIDDLE
                     
-        elif comp.component_type == "AgGridToolbar":
+        elif comp.component_type in ("DatePicker", "HdsDatePicker", "Calendar"):
+            # Ant Design 스타일의 DatePicker (입력창 + 우측 달력 아이콘)
+            shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
+            shape.fill.solid()
+            shape.fill.fore_color.rgb = RGBColor(255, 255, 255)
+            shape.line.color.rgb = RGBColor(180, 180, 180)
+            
+            tf = shape.text_frame
+            # 날짜 텍스트가 없으면 기본값 YYYY-MM-DD 삽입
+            safe_text = comp.text if comp.text else "YYYY-MM-DD"
+            tf.text = f" {safe_text}   📅"
+            tf.paragraphs[0].alignment = PP_ALIGN.LEFT
+            tf.paragraphs[0].font.color.rgb = RGBColor(100, 100, 100)
+            tf.paragraphs[0].font.size = Pt(12)
+            
+        elif comp.component_type in ("AgGridToolbar", "TableToolbar", "GridToolbar", "Toolbar", "HdsDataGridToolbar"):
             # AG Grid 상단 툴바 (우측 정렬된 액션 버튼이나 검색창 표현)
             txBox = slide.shapes.add_textbox(left, top, width, height)
             tf = txBox.text_frame
@@ -251,7 +282,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             tf.paragraphs[0].font.size = Pt(11)
             tf.paragraphs[0].font.bold = True
             
-        elif comp.component_type == "AgGridPagination":
+        elif comp.component_type in ("AgGridPagination", "TablePagination", "GridPagination", "Pagination", "HdsPagination"):
             # AG Grid 하단 페이징 영역 (가운데 정렬된 페이지 번호)
             shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
             shape.fill.solid()
@@ -264,17 +295,19 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             tf.paragraphs[0].font.color.rgb = RGBColor(100, 100, 100)
             tf.paragraphs[0].font.size = Pt(11)
             
-        elif comp.component_type == "Checkbox":
+        elif comp.component_type in ("Checkbox", "HdsCheckbox"):
             # Checkbox: 텍스트 박스를 그리고 좌측에 체크박스 특수문자(☑ 또는 ☐) 삽입
             txBox = slide.shapes.add_textbox(left, top, width, height)
             tf = txBox.text_frame
             # Ant Design의 체크 안 된 상태의 기본 박스 모양 표현
-            tf.text = f"☐ {comp.text}" 
+            safe_text = comp.text if comp.text else "체크박스"
+            tf.text = f"☐ {safe_text}" 
+            tf.word_wrap = True
             tf.paragraphs[0].alignment = PP_ALIGN.LEFT
             tf.paragraphs[0].font.color.rgb = RGBColor(50, 50, 50)
             tf.paragraphs[0].font.size = Pt(12)
             
-        elif comp.component_type == "ToggleSwitch":
+        elif comp.component_type in ("ToggleSwitch", "Switch", "HdsSwitch"):
             # Ant Design 스타일의 Toggle Switch (활성화 상태 표현)
             shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height) # 둥근 사각형
             shape.fill.solid()
@@ -286,17 +319,18 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             tf.paragraphs[0].alignment = PP_ALIGN.RIGHT
             tf.paragraphs[0].font.color.rgb = RGBColor(255, 255, 255)
             
-        elif comp.component_type == "RadioButton":
+        elif comp.component_type in ("RadioButton", "Radio", "HdsRadio"):
             # Ant Design 스타일의 Radio Button (동그란 라디오 버튼 + 텍스트)
             txBox = slide.shapes.add_textbox(left, top, width, height)
             tf = txBox.text_frame
-            safe_text = comp.text if comp.text else ""
+            safe_text = comp.text if comp.text else "라디오"
             tf.text = f"◉ {safe_text}" # 선택된 라디오 버튼 기호
+            tf.word_wrap = True
             tf.paragraphs[0].alignment = PP_ALIGN.LEFT
             tf.paragraphs[0].font.color.rgb = RGBColor(50, 50, 50)
             tf.paragraphs[0].font.size = Pt(12)
             
-        elif comp.component_type == "Modal":
+        elif comp.component_type in ("Modal", "HdsModal", "Dialog"):
             # Ant Design 스타일의 모달(Modal) 창 (팝업 컨테이너)
             shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
             shape.fill.solid()
@@ -311,7 +345,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             tf.paragraphs[0].font.bold = True
             tf.paragraphs[0].font.size = Pt(14)
 
-        elif comp.component_type == "TextLabel":
+        elif comp.component_type in ("TextLabel", "Label", "Text", "Typography"):
             # 배경이 없는 투명한 텍스트 박스
             txBox = slide.shapes.add_textbox(left, top, width, height)
             tf = txBox.text_frame
@@ -320,7 +354,7 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             tf.paragraphs[0].font.color.rgb = RGBColor(30, 30, 30)
             tf.paragraphs[0].font.size = Pt(14)
             
-        elif comp.component_type == "ImagePlaceholder":
+        elif comp.component_type in ("ImagePlaceholder", "Image", "Picture", "HdsImage"):
             # 대각선이 교차하는 이미지 자리표시자 스타일 (MSO_SHAPE.RECTANGLE = 1)
             shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
             shape.fill.solid()
@@ -331,6 +365,21 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
             tf.text = "[ 이미지 영역 ]"
             tf.paragraphs[0].alignment = PP_ALIGN.CENTER
             tf.paragraphs[0].font.color.rgb = RGBColor(150, 150, 150)
+            
+        else:
+            # [자동화 폴백] 사전에 정의되지 않은 새로운 컴포넌트 타입이 들어올 경우의 범용 렌더링
+            shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
+            shape.fill.solid()
+            shape.fill.fore_color.rgb = RGBColor(245, 245, 255) # 연한 푸른빛 배경
+            shape.line.color.rgb = RGBColor(150, 150, 200) # 푸른빛 테두리
+            
+            tf = shape.text_frame
+            safe_text = comp.text if comp.text else ""
+            tf.text = f"[{comp.component_type}] {safe_text}"
+            tf.word_wrap = True
+            tf.paragraphs[0].alignment = PP_ALIGN.CENTER
+            tf.paragraphs[0].font.color.rgb = RGBColor(100, 100, 150)
+            tf.paragraphs[0].font.size = Pt(12)
 
     # --- [우측 화면 설명(Description) 영역 추가 시작] ---
     desc_left = int(actual_slide_width * 0.72)
@@ -345,6 +394,10 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file):
     
     tf_desc = desc_shape.text_frame
     tf_desc.word_wrap = True
+    tf_desc.margin_left = Inches(0.15)
+    tf_desc.margin_right = Inches(0.15)
+    tf_desc.margin_top = Inches(0.15)
+    tf_desc.margin_bottom = Inches(0.15)
     
     p_title = tf_desc.paragraphs[0]
     p_title.text = "📌 화면 설명 및 정책"

@@ -7,6 +7,15 @@ body {
     color: #333;
 }
 
+/* Base Button (기본 회색 버튼) */
+.ant-btn {
+    border: 1px solid #d9d9d9;
+    background-color: #fff;
+    border-radius: 6px;
+    padding: 6px 15px;
+    cursor: pointer;
+}
+
 /* Primary Button (빨간색) */
 .ant-btn-primary {
     background-color: #E60012;
@@ -34,6 +43,26 @@ body {
     background-color: #fff;
 }
 
+/* DatePicker (날짜 선택기) */
+.ant-picker {
+    border: 1px solid #b4b4b4;
+    border-radius: 4px;
+    padding: 6px 11px;
+    background-color: #fff;
+}
+
+/* Checkbox & Radio (사내 브랜드 컬러 적용) */
+.ant-checkbox-checked .ant-checkbox-inner,
+.ant-radio-checked .ant-radio-inner {
+    background-color: #E60012;
+    border-color: #E60012;
+}
+
+/* Progress Bar (진행 상태 바) */
+.ant-progress-bg {
+    background-color: #E60012 !important;
+}
+
 /* Modal (진한 테두리와 그림자) */
 .ant-modal {
     border: 2px solid #787878;
@@ -43,14 +72,32 @@ body {
     padding: 20px;
 }
 
+/* Tooltip (어두운 말풍선) */
+.ant-tooltip-inner {
+    background-color: #3c3c3c;
+    color: #fff;
+}
+
 /* Toggle Switch (파란색 활성화) */
 .ant-switch-checked {
     background-color: #1890ff;
 }
 
+/* Toggle Switch (기본 비활성화 상태) */
+.ant-switch {
+    background-color: #00000040;
+}
+
 /* AG Grid 헤더 (연한 회색) */
+.ag-theme-alpine .ag-header,
 .ag-header {
     background-color: #f8f8f8;
     border-bottom: 1px solid #e0e0e0;
     font-weight: bold;
+}
+
+/* AG Grid 전체 래퍼 (테두리 보정) */
+.ag-root-wrapper {
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
 }
