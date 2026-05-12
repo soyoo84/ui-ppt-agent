@@ -270,13 +270,21 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
             grid_width = max(int(Inches(2.5)), width)
             grid_height = max(int(Inches(1.2)), height)
             
-            # 3행 4열의 기본 표를 생성하여 시각적으로 풍부하게 표현
-            table_shape = slide.shapes.add_table(3, 4, left, top, grid_width, grid_height)
+            # 동적 컬럼 계산 (컴포넌트 텍스트 콤마 분리)
+            columns = [c.strip() for c in comp.text.split(",") if c.strip()] if comp.text else []
+            if not columns:
+                columns = ["Column 1", "Column 2", "Column 3", "Column 4"]
+            
+            num_cols = len(columns)
+            num_rows = 3 # 헤더 1행 + 데이터 2행 (시각적 풍부함을 위해 고정)
+            
+            # 텍스트 개수에 맞춰 동적으로 표 생성
+            table_shape = slide.shapes.add_table(num_rows, num_cols, left, top, grid_width, grid_height)
             table = table_shape.table
             
             # 헤더(첫 행) 및 데이터 행 스타일링
-            for r_idx in range(3):
-                for c_idx in range(4):
+            for r_idx in range(num_rows):
+                for c_idx in range(num_cols):
                     cell = table.cell(r_idx, c_idx)
                     # [찌그러짐 방어] PPT 셀의 기본 여백이 너무 커서 텍스트가 찌그러지는 현상 방지
                     cell.margin_left = Pt(4)
@@ -285,12 +293,12 @@ def create_editable_ppt(analysis_result: ScreenAnalysisResult, output_file, temp
                     cell.margin_bottom = Pt(4)
                     
                     if r_idx == 0:
-                        cell.text = f"Column {c_idx + 1}"
+                        cell.text = columns[c_idx]
                         cell.fill.solid()
                         cell.fill.fore_color.rgb = RGBColor(240, 245, 250) # 세련된 연한 파란색 헤더
                         cell.text_frame.paragraphs[0].font.bold = True
                     else:
-                        cell.text = comp.text if c_idx == 0 and r_idx == 1 and comp.text else "Data"
+                        cell.text = "Data"
                     
                     cell.text_frame.paragraphs[0].font.size = Pt(10)
                     cell.text_frame.paragraphs[0].font.color.rgb = RGBColor(80, 80, 80)

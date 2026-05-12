@@ -61,6 +61,7 @@ class ScreenAnalysisResult(BaseModel):
     screen_description: Optional[str] = Field(default="", description="해당 화면의 주요 기능, 목적, 정책 등에 대한 상세 설명")
     generated_html: Optional[str] = Field(default="", description="Ant Design 클래스명을 사용한 HTML DOM 구조 코드")
     components: Optional[List[UIComponent]] = Field(default_factory=list, description="화면에서 추출된 TO-BE UI 컴포넌트 목록")
+    token_usage: Optional[dict] = Field(default_factory=dict, description="LLM API 호출에 사용된 토큰 및 비용 정보")
 
     @model_validator(mode='before')
     @classmethod
@@ -79,4 +80,5 @@ class ScreenAnalysisResult(BaseModel):
         if self.screen_description is None: self.screen_description = ""
         if self.generated_html is None: self.generated_html = ""
         if self.components is None: self.components = []
+        if self.token_usage is None: self.token_usage = {}
         return self

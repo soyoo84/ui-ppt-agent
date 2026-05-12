@@ -8,7 +8,7 @@ import csv
 import html
 import logging
 from prompts import PROMPT_TEMPLATES
-from config import APP_TITLE, HCP_API_URL, HCP_TEXT_MODEL, MASTER_TEMPLATE_DIR, TARGET_LAYOUT_NAME
+from config import APP_TITLE, HCP_API_URL, HCP_TEXT_MODEL, MASTER_TEMPLATE_DIR, TARGET_LAYOUT_NAME, DEFAULT_LLM_ENGINE
 from local_llm_service import HCPQwenService
 from ppt_service import create_editable_ppt, get_layout_names
 
@@ -30,6 +30,61 @@ def load_css_content(file_path="hds.css"):
         with open(file_path, "r", encoding="utf-8") as f:
             return f.read()
     return ""
+
+def filter_used_css(html_str, raw_css):
+    """HTML 코드에서 사용된 클래스명을 스캔하여, 수만 줄의 CSS에서 필요한 규칙만 정밀하게 추출합니다."""
+    if not raw_css or len(raw_css) < 5000:
+        return raw_css
+        
+    # 1. HTML에서 사용된 모든 클래스명 스캔 (class="..." 또는 className="...")
+    used_classes = set()
+    for match in re.finditer(r'(?:class|className)=["\']([^"\']+)["\']', html_str):
+        used_classes.update(match.group(1).split())
+        
+    if not used_classes:
+        return raw_css
+        
+    css_clean = re.sub(r'/\*.*?\*/', '', raw_css, flags=re.DOTALL)
+    filtered_css = ["/* 🎯 캡처 화면(HTML)에 사용된 핵심 CSS 클래스만 추출한 요약 스타일시트입니다. */"]
+    
+    # 2. 중괄호 균형 기반 CSS 파서 (안전한 블록 추출)
+    i, length, depth = 0, len(css_clean), 0
+    selector, block = "", ""
+    
+    while i < length:
+        char = css_clean[i]
+        if char == '{':
+            if depth == 0: depth += 1
+            else: block += char; depth += 1
+        elif char == '}':
+            depth -= 1
+            if depth == 0:
+                sel = selector.strip()
+                if sel:
+                    # @media 같은 중첩 규칙은 내부에 사용된 클래스가 존재할 경우 전체 보존
+                    if sel.startswith('@'):
+                        if sel.startswith('@keyframes'):
+                            filtered_css.append(f"{sel} {{{block}}}")
+                        elif any(cls in block for cls in used_classes):
+                            filtered_css.append(f"{sel} {{{block}}}")
+                    else:
+                        # 일반 태그(body, html, input 등)는 무조건 보존
+                        if sel.lower() in ['body', 'html', '*', ':root']:
+                            filtered_css.append(f"{sel} {{{block}}}")
+                        else:
+                            sel_classes = set(re.findall(r'\.([a-zA-Z0-9_-]+)', sel))
+                            # 클래스가 아예 안 붙은 범용 속성이거나 사용된 클래스가 포함된 경우 보존
+                            if not sel_classes or used_classes.intersection(sel_classes):
+                                filtered_css.append(f"{sel} {{{block}}}")
+                selector, block = "", ""
+            else: block += char
+        else:
+            if depth == 0: selector += char
+            else: block += char
+        i += 1
+        
+    result = "\n".join(filtered_css)
+    return result if len(result) > 100 else raw_css
 
 # 상태 관리 (State): 파일이 바뀌면 이전 JSON 초기화
 if "last_file_id" not in st.session_state:
@@ -179,15 +234,250 @@ with col1:
                             else:
                                 st.warning(f"추출된 CSS 스타일이 없습니다. (사유: {msg})")
 
+                st.markdown("---")
+                st.markdown("#### 📦 커스텀 라이브러리(NPM / .tgz) 적용")
+                st.markdown("사내 커스텀 패키지(`.tgz`)를 업로드하거나 NPM에서 다운로드하여 CSS를 자동 추출합니다.")
+                
+                # 1. 파일 업로드 방식 (사내망 .tgz 배포용)
+                uploaded_tgz = st.file_uploader("로컬 .tgz 파일 업로드", type=["tgz", "gz"])
+                if uploaded_tgz and st.button("업로드한 패키지에서 CSS 추출 및 적용", use_container_width=True):
+                    import tarfile
+                    with st.spinner("압축 해제 및 CSS 추출 중..."):
+                        try:
+                            tar = tarfile.open(fileobj=io.BytesIO(uploaded_tgz.getvalue()), mode="r:gz")
+                            
+                            # 1. 흩어져 있는 모든 CSS 파일을 찾아 하나로 병합
+                            css_files = [m for m in tar.getmembers() if m.name.endswith('.css')]
+                            if css_files:
+                                combined_css = ""
+                                for m in css_files:
+                                    f = tar.extractfile(m)
+                                    if f:
+                                        combined_css += f"/* Source: {m.name} */\n" + f.read().decode('utf-8', errors='ignore') + "\n"
+                                with open("hds.css", "w", encoding="utf-8") as out_f:
+                                    out_f.write(combined_css)
+                                st.success(f"✅ {len(css_files)}개의 파편화된 CSS 파일을 병합하여 `hds.css`에 저장했습니다.")
+                            else:
+                                st.warning("패키지 내에 CSS 파일이 없습니다. (CSS-in-JS 방식을 사용하는 라이브러리일 수 있습니다.)")
+                                
+                            # 2. 컴포넌트 폴더명(combo 등)을 파싱하여 레지스트리에 자동 등록 및 실제 폴더 추출
+                            component_names = set()
+                            component_props_map = {}
+                            extracted_files_count = 0
+                            for m in tar.getmembers():
+                                # [추가] 실제 components 폴더를 로컬 디렉토리에 압축 해제
+                                comp_path_match = re.search(r'(?:^|/)(components/.*)', m.name)
+                                if comp_path_match:
+                                    target_path = os.path.normpath(os.path.join(".", comp_path_match.group(1)))
+                                    if m.isdir():
+                                        os.makedirs(target_path, exist_ok=True)
+                                    else:
+                                        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                                        f_extracted = tar.extractfile(m)
+                                        if f_extracted:
+                                            with open(target_path, "wb") as out_f:
+                                                out_f.write(f_extracted.read())
+                                            extracted_files_count += 1
+                                            
+                                match = re.search(r'components/([^/]+)/', m.name)
+                                if match:
+                                    name = match.group(1)
+                                    # 소문자 케밥케이스(combo-box)를 파스칼케이스(ComboBox)로 변환
+                                    pascal_name = "".join(word.capitalize() for word in name.split('-'))
+                                    component_names.add(pascal_name)
+                                    
+                                    # [추가] TS/JS 파일에서 Props(속성) 정보 추출
+                                    if m.name.endswith(('.ts', '.tsx', '.d.ts', '.js', '.jsx')):
+                                        f = tar.extractfile(m)
+                                        if f:
+                                            content = f.read().decode('utf-8', errors='ignore')
+                                            # TypeScript의 interface/type Props 또는 JS의 propTypes 블록 추출
+                                            props_match = re.search(r'(?:(?:interface|type)\s+\w*Props[\s=]*|propTypes[\s=]*)\{([^}]+)\}', content)
+                                            if props_match:
+                                                raw_props = props_match.group(1).strip()
+                                                clean_props = re.sub(r'//.*', '', raw_props) # 한 줄 주석 제거
+                                                clean_props = re.sub(r'/\*.*?\*/', '', clean_props, flags=re.DOTALL) # 여러 줄 주석 제거
+                                                clean_props = re.sub(r'\s+', ' ', clean_props).strip() # 줄바꿈/다중 공백 압축
+                                                
+                                                # 토큰 최적화를 위해 길이 제한 (너무 길면 자름)
+                                                if len(clean_props) > 200: 
+                                                    clean_props = clean_props[:197] + "..."
+                                                component_props_map[pascal_name] = clean_props
+                                    
+                            if component_names:
+                                from prompts import get_component_registry
+                                import json
+                                registry = get_component_registry()
+                                added_count = 0
+                                for c_name in component_names:
+                                    # 이미 존재하는 컴포넌트가 아니면 사내 규칙(Hds~)에 맞춰 신규 등록
+                                    if c_name not in registry and f"Hds{c_name}" not in registry:
+                                        final_name = f"Hds{c_name}"
+                                        
+                                        guide_text = f"<{final_name}> 커스텀 컴포넌트입니다."
+                                        if c_name in component_props_map:
+                                            guide_text += f" 사용 가능 속성(Props): {component_props_map[c_name]}"
+                                            
+                                        registry[final_name] = {
+                                            "guide": guide_text,
+                                            "ppt_style": {"shape": "RECTANGLE", "bg": [245, 245, 255], "line": [200, 200, 200], "text": [50, 50, 50], "size": 12, "bold": False}
+                                        }
+                                        added_count += 1
+                                if added_count > 0:
+                                    with open("components_registry.json", "w", encoding="utf-8") as f:
+                                        json.dump(registry, f, ensure_ascii=False, indent=4)
+                                    st.success(f"🎉 성공! `components/` 폴더를 분석하여 {added_count}개의 커스텀 컴포넌트를 시스템에 자동 등록했습니다. (📁 {extracted_files_count}개 파일 추출 완료)")
+                                elif extracted_files_count > 0:
+                                    st.success(f"✅ `components/` 폴더에서 {extracted_files_count}개의 파일 압축 해제를 완료했습니다.")
+                        except Exception as e:
+                            st.error(f"추출 실패: {e}")
+                            
+                # 2. NPM 레지스트리 다운로드 방식
+                npm_package = st.text_input("NPM 패키지명 입력 (예: antd)", value="antd")
+                if st.button("📥 NPM에서 직접 다운로드 및 CSS 적용", use_container_width=True):
+                    import urllib.request
+                    import json
+                    import tarfile
+                    with st.spinner(f"NPM에서 '{npm_package}' 패키지를 다운로드하는 중..."):
+                        try:
+                            # NPM Registry에서 최신 버전 타볼(Tarball) URL 확보
+                            req = urllib.request.Request(f"https://registry.npmjs.org/{npm_package}/latest")
+                            with urllib.request.urlopen(req) as response:
+                                pkg_data = json.loads(response.read().decode())
+                                tarball_url = pkg_data['dist']['tarball']
+                            
+                            st.info("패키지 정보 확인 완료. 파일 다운로드를 시작합니다...", icon="⏳")
+                            
+                            # 타볼 다운로드 후 메모리에서 압축 해제 및 CSS 추출
+                            req_tar = urllib.request.Request(tarball_url)
+                            with urllib.request.urlopen(req_tar) as response:
+                                tar = tarfile.open(fileobj=io.BytesIO(response.read()), mode="r:gz")
+                                
+                                # 1. 흩어져 있는 모든 CSS 파일을 찾아 하나로 병합
+                                css_files = [m for m in tar.getmembers() if m.name.endswith('.css')]
+                                if css_files:
+                                    combined_css = ""
+                                    for m in css_files:
+                                        f = tar.extractfile(m)
+                                        if f:
+                                            combined_css += f"/* Source: {m.name} */\n" + f.read().decode('utf-8', errors='ignore') + "\n"
+                                    with open("hds.css", "w", encoding="utf-8") as out_f:
+                                        out_f.write(combined_css)
+                                    st.success(f"✅ NPM 패키지 다운로드 완료! {len(css_files)}개의 CSS 파일을 병합하여 `hds.css`에 저장했습니다.")
+                                else:
+                                    st.warning("패키지 내에 CSS 파일이 없습니다. (CSS-in-JS 방식을 사용하는 라이브러리일 수 있습니다.)")
+                                    
+                                # 2. 컴포넌트 폴더명 파싱, Props 스캔 및 실제 폴더 추출
+                                component_names = set()
+                                component_props_map = {}
+                                extracted_files_count = 0
+                                for m in tar.getmembers():
+                                    comp_path_match = re.search(r'(?:^|/)(components/.*)', m.name)
+                                    if comp_path_match:
+                                        target_path = os.path.normpath(os.path.join(".", comp_path_match.group(1)))
+                                        if m.isdir():
+                                            os.makedirs(target_path, exist_ok=True)
+                                        else:
+                                            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                                            f_extracted = tar.extractfile(m)
+                                            if f_extracted:
+                                                with open(target_path, "wb") as out_f:
+                                                    out_f.write(f_extracted.read())
+                                                extracted_files_count += 1
+                                                
+                                    match = re.search(r'components/([^/]+)/', m.name)
+                                    if match:
+                                        name = match.group(1)
+                                        pascal_name = "".join(word.capitalize() for word in name.split('-'))
+                                        component_names.add(pascal_name)
+                                        
+                                        if m.name.endswith(('.ts', '.tsx', '.d.ts', '.js', '.jsx')):
+                                            f = tar.extractfile(m)
+                                            if f:
+                                                content = f.read().decode('utf-8', errors='ignore')
+                                                props_match = re.search(r'(?:(?:interface|type)\s+\w*Props[\s=]*|propTypes[\s=]*)\{([^}]+)\}', content)
+                                                if props_match:
+                                                    raw_props = props_match.group(1).strip()
+                                                    clean_props = re.sub(r'//.*', '', raw_props)
+                                                    clean_props = re.sub(r'/\*.*?\*/', '', clean_props, flags=re.DOTALL)
+                                                    clean_props = re.sub(r'\s+', ' ', clean_props).strip()
+                                                    if len(clean_props) > 200: 
+                                                        clean_props = clean_props[:197] + "..."
+                                                    component_props_map[pascal_name] = clean_props
+
+                                if component_names:
+                                    from prompts import get_component_registry
+                                    import json
+                                    registry = get_component_registry()
+                                    added_count = 0
+                                    for c_name in component_names:
+                                        if c_name not in registry and f"Hds{c_name}" not in registry:
+                                            final_name = f"Hds{c_name}"
+                                            guide_text = f"<{final_name}> 커스텀 컴포넌트입니다."
+                                            if c_name in component_props_map:
+                                                guide_text += f" 사용 가능 속성(Props): {component_props_map[c_name]}"
+                                            registry[final_name] = {
+                                                "guide": guide_text,
+                                                "ppt_style": {"shape": "RECTANGLE", "bg": [245, 245, 255], "line": [200, 200, 200], "text": [50, 50, 50], "size": 12, "bold": False}
+                                            }
+                                            added_count += 1
+                                    if added_count > 0:
+                                        with open("components_registry.json", "w", encoding="utf-8") as f:
+                                            json.dump(registry, f, ensure_ascii=False, indent=4)
+                                        st.success(f"🎉 성공! NPM 패키지 내 `components/` 폴더를 분석하여 {added_count}개의 컴포넌트를 시스템에 자동 등록했습니다. (📁 {extracted_files_count}개 파일 추출 완료)")
+                                    elif extracted_files_count > 0:
+                                        st.success(f"✅ NPM 패키지에서 `components/` 폴더 내 {extracted_files_count}개의 파일 압축 해제를 완료했습니다.")
+                        except Exception as e:
+                            st.error(f"NPM 패키지 처리 실패: {e}")
+
+with st.sidebar:
+    st.header("🤖 LLM 엔진 선택")
+    llm_options = ["HCP (Qwen)", "Gemini (테스트)"]
+    default_idx = 1 if "gemini" in DEFAULT_LLM_ENGINE.lower() else 0
+    llm_choice = st.radio("테스트 및 비교용으로 다른 LLM을 선택할 수 있습니다.", llm_options, index=default_idx)
+        
+    if st.session_state.get("generated_data"):
+        data = st.session_state["generated_data"]
+        usage = data.get("token_usage", {})
+        if usage:
+            st.markdown("---")
+            st.subheader("📊 API 사용량 및 예상 비용")
+            p_tokens = usage.get("prompt_tokens", 0)
+            c_tokens = usage.get("completion_tokens", 0)
+            t_tokens = usage.get("total_tokens", 0)
+            
+            llm_used = data.get("llm_choice", "")
+            if "Gemini" in llm_used:
+                cost_p = (p_tokens / 1000) * 0.00125
+                cost_c = (c_tokens / 1000) * 0.00500
+            else:
+                cost_p = (p_tokens / 1000) * 0.0005
+                cost_c = (c_tokens / 1000) * 0.0015
+            total_cost = cost_p + cost_c
+            
+            col_u1, col_u2 = st.columns(2)
+            col_u1.metric("입력 토큰 (Prompt)", f"{p_tokens:,}")
+            col_u2.metric("출력 토큰 (Completion)", f"{c_tokens:,}")
+            st.metric("예상 비용 (추정치)", f"${total_cost:.4f}")
+            st.caption(f"※ 총 토큰: {t_tokens:,} ({llm_used} 단가 기준)")
+
+    st.markdown("---")
+
 # 공통 PPT 생성 함수 (버튼 및 채팅창에서 호출)
-def generate_and_render_ppt(img_bytes, prompt_text, prev_json, feedback_msg, template_path=None, layout_name=None) -> bool:
-    spinner_msg = "피드백을 반영하여 PPT를 다시 그리는 중입니다..." if prev_json else f"HCP API({HCP_TEXT_MODEL})가 이미지를 분석하고 PPT를 그리는 중입니다..."
+def generate_and_render_ppt(img_bytes, prompt_text, prev_json, feedback_msg, template_path=None, layout_name=None, selected_llm="HCP (Qwen)") -> bool:
+    model_name_for_msg = "Gemini" if selected_llm == "Gemini (테스트)" else f"HCP API({HCP_TEXT_MODEL})"
+    spinner_msg = f"피드백을 반영하여 PPT를 다시 그리는 중입니다... ({model_name_for_msg})" if prev_json else f"{model_name_for_msg}가 이미지를 분석하고 PPT를 그리는 중입니다..."
     with st.spinner(spinner_msg):
         start_time = time.time()
-        logger.info(f"=== PPT 생성 요청 시작 (레이아웃: {layout_name}) ===")
+        logger.info(f"=== PPT 생성 요청 시작 (엔진: {selected_llm}, 레이아웃: {layout_name}) ===")
         
         try:
-            llm_service = HCPQwenService(base_url=HCP_API_URL)
+            if selected_llm == "Gemini (테스트)":
+                from local_llm_service import GeminiService
+                llm_service = GeminiService()
+            else:
+                llm_service = HCPQwenService(base_url=HCP_API_URL)
+                
             analysis_result = llm_service.analyze_asis_image_local(
                 img_bytes,
                 custom_system_prompt=prompt_text,
@@ -218,8 +508,8 @@ def generate_and_render_ppt(img_bytes, prompt_text, prev_json, feedback_msg, tem
 <head>
     <meta charset="UTF-8">
     <title>{analysis_result.screen_name}</title>
-    <!-- Ant Design 기본 스타일 CDN (미리보기 렌더링용) -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/antd/4.24.14/antd.min.css">
+    <!-- 사내 커스텀 Ant Design 사용 시 표준 CDN 충돌 방지를 위해 주석 처리 -->
+    <!-- <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/antd/4.24.14/antd.min.css"> -->
     <link rel="stylesheet" href="./hds.css">
     <style>
         body {{ background-color: #f0f2f5; padding: 20px; font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; }}
@@ -250,7 +540,9 @@ def generate_and_render_ppt(img_bytes, prompt_text, prev_json, feedback_msg, tem
                 "json_str": json_content,
                 "components": analysis_result.components,
                 "screen_name": analysis_result.screen_name,
-                "is_react": "React" in prompt_text
+                "is_react": "React" in prompt_text,
+                "token_usage": analysis_result.token_usage,
+                "llm_choice": selected_llm
             }
             st.session_state["last_json"] = json_content
             elapsed = round(time.time() - start_time, 1)
@@ -269,17 +561,20 @@ with col2:
         if not st.session_state.get("generated_data"):
             if st.button("🚀 PPT 생성 시작", use_container_width=True):
                 st.session_state["generated_data"] = None
-                generate_and_render_ppt(image_bytes, custom_prompt, None, None, selected_template_path, selected_layout_name)
+                generate_and_render_ppt(image_bytes, custom_prompt, None, None, selected_template_path, selected_layout_name, llm_choice)
         else:
             # 이미 생성된 후, 좌측의 고급 설정(프롬프트, 템플릿)을 변경하고 다시 생성하고 싶을 때를 위한 버튼
             if st.button("🔄 새로운 설정으로 다시 생성", use_container_width=True):
-                generate_and_render_ppt(image_bytes, custom_prompt, None, None, selected_template_path, selected_layout_name)
+                generate_and_render_ppt(image_bytes, custom_prompt, None, None, selected_template_path, selected_layout_name, llm_choice)
                 
         # 결과 렌더링
         if st.session_state.get("generated_data"):
             data = st.session_state["generated_data"]
             try:
-                css_content = load_css_content("hds.css")
+                raw_css_content = load_css_content("hds.css")
+                
+                # [CSS 다이어트] 수만 줄의 원본 CSS를 화면 렌더링에 사용된 핵심 클래스로만 요약 필터링
+                css_content = filter_used_css(data.get("raw_html", ""), raw_css_content)
                 
                 # [상태 동기화 방어] 생성 시점의 프롬프트 상태(is_react)를 기준으로 UI를 렌더링 (드롭다운 변경 시 UI 깨짐 방지)
                 is_react_mode = data.get("is_react", "React" in custom_prompt)
@@ -371,10 +666,10 @@ if feedback:
         if not prev_json:
             # 1차 생성 전에 처음부터 바로 채팅을 친 경우: 시스템 프롬프트에 요구사항 추가
             prompt_to_use += f"\n\n[특별 요청사항]\n{feedback}"
-            success = generate_and_render_ppt(image_bytes, prompt_to_use, None, None, selected_template_path, selected_layout_name)
+            success = generate_and_render_ppt(image_bytes, prompt_to_use, None, None, selected_template_path, selected_layout_name, llm_choice)
         else:
             # 이미 1차 결과가 있는 경우: 피드백 루프로 반영
-            success = generate_and_render_ppt(image_bytes, prompt_to_use, prev_json, feedback, selected_template_path, selected_layout_name)
+            success = generate_and_render_ppt(image_bytes, prompt_to_use, prev_json, feedback, selected_template_path, selected_layout_name, llm_choice)
             
         if success:
             st.rerun()

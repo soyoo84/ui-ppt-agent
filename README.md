@@ -50,6 +50,8 @@ HCP_API_URL=https://hcp.skhynix.com/llm/v1
 HCP_API_KEY=your_api_key_here
 HCP_VISION_MODEL=qwen-2.5-vl
 HCP_TEXT_MODEL=qwen-3.5
+GEMINI_API_KEY=your_gemini_api_key_here
+DEFAULT_LLM_ENGINE=Gemini
 ```
 * **사내 PPT 템플릿:** `master/` 폴더에 `.pptx` 파일 추가
 * **사내 HDS CSS:** 루트의 `hds.css` 파일 덮어쓰기

@@ -43,6 +43,17 @@ LLM_TIMEOUT_SECONDS = _get_env_float("LLM_TIMEOUT_SECONDS", 120.0)
 LLM_MAX_TOKENS = _get_env_int("LLM_MAX_TOKENS", 1500)
 LLM_TEMPERATURE = _get_env_float("LLM_TEMPERATURE", 0.1)
 
+# [Gemini Settings]
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-pro")
+GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-pro")
+
+# [엔진 선택 설정] 환경 변수를 통한 기본 LLM 엔진 설정
+DEFAULT_LLM_ENGINE = os.getenv("DEFAULT_LLM_ENGINE", "HCP (Qwen)")
+# 사용자가 제미나이를 기본으로 설정했으나 API 키가 누락된 경우 안전하게 Qwen으로 롤백
+if "gemini" in DEFAULT_LLM_ENGINE.lower() and not GEMINI_API_KEY:
+    DEFAULT_LLM_ENGINE = "HCP (Qwen)"
+
 # [Frontend Settings]
 APP_TITLE = os.getenv("APP_TITLE") or "UI-PPT 자동 생성기"
 
